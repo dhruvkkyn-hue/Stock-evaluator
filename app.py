@@ -118,6 +118,19 @@ init_db()
 # Parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def valid_df(df) -> bool:
+    """True when df is a non-empty DataFrame."""
+    return df is not None and not df.empty
+
+
+def first_valid_df(*dfs):
+    """Return the first non-empty DataFrame, or None."""
+    for df in dfs:
+        if valid_df(df):
+            return df
+    return None
+
+
 def to_num(val):
     """Convert a cell value to float; handles Screener formats (₹, Cr, %, x)."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
@@ -145,6 +158,8 @@ def to_num(val):
 
 def find_row(df: pd.DataFrame, label: str):
     """Return (row, label_col_index) for the first row containing label in any cell."""
+    if not valid_df(df):
+        return None, None
     label_lower = label.lower()
     best_row, best_col = None, None
     for _, row in df.iterrows():
@@ -194,6 +209,17 @@ def scalar_cell(df: pd.DataFrame, label: str, col_idx: int | None = None):
     return None
 
 
+def first_row_series(df: pd.DataFrame, *labels: str) -> list:
+    """Return numeric values from the first matching row label."""
+    if not valid_df(df):
+        return []
+    for label in labels:
+        series = row_series(df, label)
+        if series:
+            return series
+    return []
+
+
 def cagr(start, end, years):
     """Calculate CAGR given start, end values and number of years."""
     if start and end and years and start > 0:
@@ -230,36 +256,37 @@ def find_sheet(sheets: dict, *keywords) -> pd.DataFrame | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_file(file) -> dict:
-    if file is None:
-        return {}
+    data: dict = {}
 
-    try:
-        # Load all sheets if Excel, or single sheet if CSV
-        if file.name.endswith('.csv'):
-            sheets = {"Data Sheet": pd.read_csv(file)}
-        else:
-            sheets = pd.read_excel(file, sheet_name=None)
-    except Exception as e:
-        return {"error": str(e)}
+    # #region agent log
+    def _debug_log(message, payload, hypothesis_id="H1"):
+        try:
+            with open("/Users/dhruv/.cursor/debug-logs/debug-f85d87.log", "a", encoding="utf-8") as _lf:
+                _lf.write(json.dumps({
+                    "sessionId": "f85d87",
+                    "runId": "parse",
+                    "hypothesisId": hypothesis_id,
+                    "location": "app.py:parse_file",
+                    "message": message,
+                    "data": payload,
+                    "timestamp": int(datetime.datetime.now().timestamp() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+    # #endregion
 
-    df_data = sheets.get("Data Sheet")
-    df_pl = sheets.get("Profit & Loss") or sheets.get("P&L")
+    is_csv = file.name.endswith(".csv")
 
-    # Safely select primary dataframe without ambiguous truth check
-    primary = None
-    if df_data is not None and not df_data.empty:
-        primary = df_data
-    elif df_pl is not None and not df_pl.empty:
-        primary = df_pl
-    elif sheets:
-        primary = list(sheets.values())[0]
+    if is_csv:
+        try:
+            df_main = pd.read_csv(file, header=None, dtype=str)
+        except Exception as e:
+            st.error(f"Could not read CSV: {e}")
+            return data
+        sheets = {"Data Sheet": df_main}
+    else:
+        sheets = load_sheets(file)
 
-    data = {
-        "primary": primary,
-        "all_sheets": sheets
-    }
-
-    return data
     # ── identify key sheets ──────────────────────────────────────────────────
     df_data    = find_sheet(sheets, "data sheet", "data")
     df_summary = find_sheet(sheets, "summary")
@@ -271,16 +298,12 @@ def parse_file(file) -> dict:
     df_bs      = find_sheet(sheets, "balance sheet", "balance")
 
     # Fall back to first sheet if data sheet not found
-    primary = None
-if df_data is not None and not df_data.empty:
-    primary = df_data
-elif df_pl is not None and not df_pl.empty:
-    primary = df_pl
-elif sheets:
-    primary = list(sheets.values())[0]
+    sheet_candidates = list(sheets.values()) if sheets else []
+    primary = first_valid_df(df_data, df_pl, *sheet_candidates)
 
-    if primary is None:
+    if not valid_df(primary):
         st.error("No readable sheet found in the uploaded file.")
+        _debug_log("no_primary_sheet", {"sheet_names": list(sheets.keys())}, "H1")
         return data
 
     # ── Company basics ───────────────────────────────────────────────────────
@@ -290,16 +313,16 @@ elif sheets:
         data["company_name"] = "Unknown Company"
 
     for df in [primary, df_summary]:
-        if df is None:
+        if not valid_df(df):
             continue
-        if not data.get("cmp"):
+        if data.get("cmp") is None:
             data["cmp"] = (
                 scalar_cell(df, "Current Price")
                 or scalar_cell(df, "Current Price (INR)")
                 or scalar_cell(df, "CMP")
                 or scalar_cell(df, "Market Price")
             )
-        if not data.get("market_cap"):
+        if data.get("market_cap") is None:
             data["market_cap"] = (
                 scalar_cell(df, "Market Capitalization")
                 or scalar_cell(df, "Market Cap")
@@ -307,9 +330,9 @@ elif sheets:
             )
 
     # ── Profit & Loss ────────────────────────────────────────────────────────
-    df_for_pl = df_pl or primary
-    sales_series = row_series(df_for_pl, "Net Sales") or row_series(df_for_pl, "Revenue") or row_series(df_for_pl, "Sales")
-    pat_series   = row_series(df_for_pl, "Net Profit") or row_series(df_for_pl, "PAT") or row_series(df_for_pl, "Profit after tax")
+    df_for_pl = first_valid_df(df_pl, primary)
+    sales_series = first_row_series(df_for_pl, "Net Sales", "Revenue", "Sales")
+    pat_series = first_row_series(df_for_pl, "Net Profit", "PAT", "Profit after tax")
 
     data["net_profit_latest"] = pat_series[-1] if pat_series else None
 
@@ -334,11 +357,11 @@ elif sheets:
         data["pat_growth_3y"] = None
 
     # ── Balance sheet ────────────────────────────────────────────────────────
-    df_for_bs = df_bs or primary
-    reserves_series   = row_series(df_for_bs, "Reserves")
-    equity_sc_series  = row_series(df_for_bs, "Equity Share Capital")
-    borrowings_series = row_series(df_for_bs, "Borrowings") or row_series(df_for_bs, "Total Debt")
-    capex_series      = row_series(df_for_bs, "Capital Expenditure") or row_series(df_for_bs, "Capex")
+    df_for_bs = first_valid_df(df_bs, primary)
+    reserves_series = row_series(df_for_bs, "Reserves")
+    equity_sc_series = row_series(df_for_bs, "Equity Share Capital")
+    borrowings_series = first_row_series(df_for_bs, "Borrowings", "Total Debt")
+    capex_series = first_row_series(df_for_bs, "Capital Expenditure", "Capex")
 
     data["reserves"]          = reserves_series[-1]   if reserves_series   else None
     data["equity_sc"]         = equity_sc_series[-1]  if equity_sc_series  else None
@@ -351,16 +374,17 @@ elif sheets:
     data["shareholder_equity"] = shareholder_equity
 
     # ── Cash Flow ────────────────────────────────────────────────────────────
-    df_for_cf = df_cf or primary
-    cfo_series = (
-        row_series(df_for_cf, "Cash from Operating")
-        or row_series(df_for_cf, "Cash from Operations")
-        or row_series(df_for_cf, "Cash from Operating Activity")
-        or row_series(df_for_cf, "Net Cash from Operating")
-        or row_series(df_for_cf, "Operating Cash")
-        or row_series(df_for_cf, "CFO")
+    df_for_cf = first_valid_df(df_cf, primary)
+    cfo_series = first_row_series(
+        df_for_cf,
+        "Cash from Operating",
+        "Cash from Operations",
+        "Cash from Operating Activity",
+        "Net Cash from Operating",
+        "Operating Cash",
+        "CFO",
     )
-    fcf_series = row_series(df_for_cf, "Free Cash Flow") or row_series(df_for_cf, "FCF")
+    fcf_series = first_row_series(df_for_cf, "Free Cash Flow", "FCF")
 
     data["cfo"] = cfo_series[-1] if cfo_series else None
     data["fcf"] = fcf_series[-1] if fcf_series else None
@@ -377,7 +401,7 @@ elif sheets:
     mkt_cap    = data.get("market_cap")
 
     for df in [df_summary, primary]:
-        if df is None:
+        if not valid_df(df):
             continue
         if data.get("roe") is None:
             data["roe"] = (
@@ -389,14 +413,14 @@ elif sheets:
             )
 
     if data.get("roe") is None:
-        data["roe"] = (net_profit / eq * 100) if net_profit and eq else None
-    data["cfo_pat"] = (cfo / net_profit) if cfo and net_profit and net_profit != 0 else None
-    data["de"]      = (borrowings / eq) if borrowings is not None and eq else None
-    data["pe"]      = (mkt_cap / net_profit) if mkt_cap and net_profit and net_profit != 0 else None
+        data["roe"] = (net_profit / eq * 100) if net_profit is not None and eq not in (None, 0) else None
+    data["cfo_pat"] = (cfo / net_profit) if cfo is not None and net_profit not in (None, 0) else None
+    data["de"] = (borrowings / eq) if borrowings is not None and eq not in (None, 0) else None
+    data["pe"] = (mkt_cap / net_profit) if mkt_cap is not None and net_profit not in (None, 0) else None
 
     # ── P/E ratio (from primary / summary) ──────────────────────────────────
     for df in [df_summary, primary]:
-        if df is None:
+        if not valid_df(df):
             continue
         if data.get("pe") is None:
             data["pe"] = (
@@ -420,7 +444,7 @@ elif sheets:
 
     # ── Intrinsic valuation ──────────────────────────────────────────────────
     for df, key in [(df_dcf, "dcf_value"), (df_graham, "graham_value"), (df_dhandho, "dhandho_value")]:
-        if df is None:
+        if not valid_df(df):
             data[key] = None
             continue
         val = (
@@ -433,8 +457,18 @@ elif sheets:
         )
         data[key] = val
 
-    data["pat_series"]   = pat_series
+    data["pat_series"] = pat_series
     data["sales_series"] = sales_series
+
+    _debug_log("parse_complete", {
+        "company": data.get("company_name"),
+        "cmp": data.get("cmp"),
+        "market_cap": data.get("market_cap"),
+        "roe": data.get("roe"),
+        "cfo": data.get("cfo"),
+        "cfo_pat": data.get("cfo_pat"),
+        "pe": data.get("pe"),
+    }, "H2")
 
     return data
 

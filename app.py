@@ -118,6 +118,89 @@ init_db()
 # Parsing helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+METRIC_ALIASES = {
+    "cmp": [
+        "Current Price",
+        "CMP",
+        "Market Price",
+        "Current Price (INR)",
+    ],
+    "market_cap": [
+        "Market Capitalization",
+        "Market Cap",
+        "Market Cap (Cr)",
+    ],
+    "pe": [
+        "Stock P/E",
+        "Price to Earning",
+        "P/E",
+        "PE Ratio",
+        "P/E Ratio",
+        "TTM P/E",
+        "Price to Earnings",
+    ],
+    "pe_5yr_avg": [
+        "5 Year Avg PE",
+        "5-Year P/E",
+        "5Yr PE",
+        "Average PE",
+        "Median PE",
+    ],
+    "roe": [
+        "Return on equity",
+        "ROE",
+        "Return on Equity %",
+        "Latest FY ROAE",
+        "ROAE",
+    ],
+    "roce": [
+        "Return on capital employed",
+        "ROCE",
+    ],
+    "de": [
+        "Debt to equity",
+        "Debt/Equity",
+        "D/E",
+        "Debt to Equity",
+    ],
+    "cfo": [
+        "Cash from Operating Activity",
+        "Operating Cash Flow",
+        "CFO",
+        "Cash from Operating",
+        "Cash from Operations",
+        "Net Cash from Operating",
+        "Operating Cash",
+    ],
+    "fcf": [
+        "Free Cash Flow",
+        "FCF",
+    ],
+    "sales": [
+        "Sales",
+        "Revenue",
+        "Net Sales",
+    ],
+    "pat": [
+        "Net Profit",
+        "PAT",
+        "Profit after tax",
+    ],
+    "reserves": ["Reserves"],
+    "equity_sc": ["Equity Share Capital"],
+    "borrowings": ["Borrowings", "Total Debt"],
+    "capex": ["Capital Expenditure", "Capex"],
+    "intrinsic": [
+        "Intrinsic Value",
+        "Fair Value",
+        "DCF Value",
+        "Graham Value",
+        "Dhandho Value",
+        "IV",
+    ],
+}
+
+
 def valid_df(df) -> bool:
     """True when df is a non-empty DataFrame."""
     return df is not None and not df.empty
@@ -129,6 +212,76 @@ def first_valid_df(*dfs):
         if valid_df(df):
             return df
     return None
+
+
+def _normalize_label(text) -> str:
+    """Normalize a cell label for case-insensitive comparison."""
+    return re.sub(r"\s+", " ", str(text).strip().lower())
+
+
+def _cell_matches_alias(cell, alias: str) -> bool:
+    """Return True when a cell matches a metric alias (flexible, case-insensitive)."""
+    cell_norm = _normalize_label(cell)
+    alias_norm = _normalize_label(alias)
+    if not cell_norm or cell_norm in ("nan", "none", "#n/a"):
+        return False
+    if not alias_norm:
+        return False
+    if cell_norm == alias_norm or alias_norm in cell_norm:
+        return True
+    if len(alias_norm) <= 5:
+        return bool(re.search(r"\b" + re.escape(alias_norm) + r"\b", cell_norm))
+    return False
+
+
+def find_label_position(df: pd.DataFrame, aliases: list[str]):
+    """Search all rows/columns; return (row_index, col_index) for first alias hit."""
+    if not valid_df(df):
+        return None, None
+    alias_list = aliases if isinstance(aliases, (list, tuple)) else [aliases]
+    for row_idx in range(len(df)):
+        row = df.iloc[row_idx]
+        for col_idx, cell in enumerate(row):
+            for alias in alias_list:
+                if _cell_matches_alias(cell, alias):
+                    return row_idx, col_idx
+    return None, None
+
+
+def fetch_metric_scalar(*dfs, aliases: list[str]):
+    """Return the first numeric value found after a matching label across sheets."""
+    alias_list = list(aliases)
+    for df in dfs:
+        if not valid_df(df):
+            continue
+        row_idx, col_idx = find_label_position(df, alias_list)
+        if row_idx is None:
+            continue
+        row = df.iloc[row_idx]
+        label_val = to_num(row.iloc[col_idx])
+        if label_val is not None:
+            return label_val
+        for v in row.iloc[col_idx + 1:]:
+            val = to_num(v)
+            if val is not None:
+                return val
+    return None
+
+
+def fetch_metric_series(*dfs, aliases: list[str]) -> list:
+    """Return all numeric values after a matching label across sheets (left→right)."""
+    alias_list = aliases if isinstance(aliases, (list, tuple)) else [aliases]
+    for df in dfs:
+        if not valid_df(df):
+            continue
+        row_idx, col_idx = find_label_position(df, alias_list)
+        if row_idx is None:
+            continue
+        row = df.iloc[row_idx]
+        nums = [to_num(v) for v in row.iloc[col_idx + 1:] if to_num(v) is not None]
+        if nums:
+            return nums
+    return []
 
 
 def to_num(val):
@@ -157,22 +310,13 @@ def to_num(val):
 
 
 def find_row(df: pd.DataFrame, label: str):
-    """Return (row, label_col_index) for the first row containing label in any cell."""
+    """Return (row Series, label_col_index) for the first alias match."""
     if not valid_df(df):
         return None, None
-    label_lower = label.lower()
-    best_row, best_col = None, None
-    for _, row in df.iterrows():
-        for i, cell in enumerate(row):
-            cell_s = str(cell).strip().lower()
-            if cell_s in ("nan", "none", ""):
-                continue
-            if label_lower in cell_s:
-                if best_row is None or i < best_col:
-                    best_row, best_col = row, i
-    if best_row is None:
+    row_idx, col_idx = find_label_position(df, [label])
+    if row_idx is None:
         return None, None
-    return best_row, best_col
+    return df.iloc[row_idx], col_idx
 
 
 def row_latest(df: pd.DataFrame, label: str):
@@ -183,41 +327,28 @@ def row_latest(df: pd.DataFrame, label: str):
 
 def row_series(df: pd.DataFrame, label: str):
     """Return all numeric values (left→right) for a row matching label."""
-    row, label_col = find_row(df, label)
-    if row is None:
-        return []
-    start = label_col + 1
-    return [to_num(v) for v in row.iloc[start:] if to_num(v) is not None]
+    return fetch_metric_series(df, aliases=[label])
 
 
 def scalar_cell(df: pd.DataFrame, label: str, col_idx: int | None = None):
-    """Return the first numeric value after the label cell in a matching row."""
-    row, label_col = find_row(df, label)
-    if row is None:
+    """Return numeric value for a single label (optional fixed column index)."""
+    if not valid_df(df):
         return None
     if col_idx is not None:
-        try:
-            val = to_num(row.iloc[col_idx])
-            if val is not None:
-                return val
-        except IndexError:
-            pass
-    for v in row.iloc[label_col + 1:]:
-        val = to_num(v)
-        if val is not None:
-            return val
-    return None
+        row_idx, label_col = find_label_position(df, [label])
+        if row_idx is not None:
+            try:
+                val = to_num(df.iloc[row_idx].iloc[col_idx])
+                if val is not None:
+                    return val
+            except IndexError:
+                pass
+    return fetch_metric_scalar(df, aliases=[label])
 
 
 def first_row_series(df: pd.DataFrame, *labels: str) -> list:
     """Return numeric values from the first matching row label."""
-    if not valid_df(df):
-        return []
-    for label in labels:
-        series = row_series(df, label)
-        if series:
-            return series
-    return []
+    return fetch_metric_series(df, aliases=list(labels))
 
 
 def cagr(start, end, years):
@@ -312,27 +443,16 @@ def parse_file(file) -> dict:
     except Exception:
         data["company_name"] = "Unknown Company"
 
-    for df in [primary, df_summary]:
-        if not valid_df(df):
-            continue
-        if data.get("cmp") is None:
-            data["cmp"] = (
-                scalar_cell(df, "Current Price")
-                or scalar_cell(df, "Current Price (INR)")
-                or scalar_cell(df, "CMP")
-                or scalar_cell(df, "Market Price")
-            )
-        if data.get("market_cap") is None:
-            data["market_cap"] = (
-                scalar_cell(df, "Market Capitalization")
-                or scalar_cell(df, "Market Cap")
-                or scalar_cell(df, "Market Cap (Cr)")
-            )
+    summary_primary = tuple(d for d in [df_summary, primary] if valid_df(d))
+    all_sheet_dfs = tuple(sheets.values()) if sheets else ()
+
+    data["cmp"] = fetch_metric_scalar(*summary_primary, *all_sheet_dfs, aliases=METRIC_ALIASES["cmp"])
+    data["market_cap"] = fetch_metric_scalar(*summary_primary, *all_sheet_dfs, aliases=METRIC_ALIASES["market_cap"])
 
     # ── Profit & Loss ────────────────────────────────────────────────────────
-    df_for_pl = first_valid_df(df_pl, primary)
-    sales_series = first_row_series(df_for_pl, "Net Sales", "Revenue", "Sales")
-    pat_series = first_row_series(df_for_pl, "Net Profit", "PAT", "Profit after tax")
+    pl_dfs = tuple(d for d in [df_pl, primary, df_data] if valid_df(d))
+    sales_series = fetch_metric_series(*pl_dfs, aliases=METRIC_ALIASES["sales"])
+    pat_series = fetch_metric_series(*pl_dfs, aliases=METRIC_ALIASES["pat"])
 
     data["net_profit_latest"] = pat_series[-1] if pat_series else None
 
@@ -357,11 +477,11 @@ def parse_file(file) -> dict:
         data["pat_growth_3y"] = None
 
     # ── Balance sheet ────────────────────────────────────────────────────────
-    df_for_bs = first_valid_df(df_bs, primary)
-    reserves_series = row_series(df_for_bs, "Reserves")
-    equity_sc_series = row_series(df_for_bs, "Equity Share Capital")
-    borrowings_series = first_row_series(df_for_bs, "Borrowings", "Total Debt")
-    capex_series = first_row_series(df_for_bs, "Capital Expenditure", "Capex")
+    bs_dfs = tuple(d for d in [df_bs, primary, df_data] if valid_df(d))
+    reserves_series = fetch_metric_series(*bs_dfs, aliases=METRIC_ALIASES["reserves"])
+    equity_sc_series = fetch_metric_series(*bs_dfs, aliases=METRIC_ALIASES["equity_sc"])
+    borrowings_series = fetch_metric_series(*bs_dfs, aliases=METRIC_ALIASES["borrowings"])
+    capex_series = fetch_metric_series(*bs_dfs, aliases=METRIC_ALIASES["capex"])
 
     data["reserves"]          = reserves_series[-1]   if reserves_series   else None
     data["equity_sc"]         = equity_sc_series[-1]  if equity_sc_series  else None
@@ -374,17 +494,9 @@ def parse_file(file) -> dict:
     data["shareholder_equity"] = shareholder_equity
 
     # ── Cash Flow ────────────────────────────────────────────────────────────
-    df_for_cf = first_valid_df(df_cf, primary)
-    cfo_series = first_row_series(
-        df_for_cf,
-        "Cash from Operating",
-        "Cash from Operations",
-        "Cash from Operating Activity",
-        "Net Cash from Operating",
-        "Operating Cash",
-        "CFO",
-    )
-    fcf_series = first_row_series(df_for_cf, "Free Cash Flow", "FCF")
+    cf_dfs = tuple(d for d in [df_cf, primary, df_data] if valid_df(d))
+    cfo_series = fetch_metric_series(*cf_dfs, aliases=METRIC_ALIASES["cfo"])
+    fcf_series = fetch_metric_series(*cf_dfs, aliases=METRIC_ALIASES["fcf"])
 
     data["cfo"] = cfo_series[-1] if cfo_series else None
     data["fcf"] = fcf_series[-1] if fcf_series else None
@@ -400,62 +512,29 @@ def parse_file(file) -> dict:
     eq         = shareholder_equity
     mkt_cap    = data.get("market_cap")
 
-    for df in [df_summary, primary]:
-        if not valid_df(df):
-            continue
-        if data.get("roe") is None:
-            data["roe"] = (
-                scalar_cell(df, "ROE")
-                or scalar_cell(df, "Return on Equity")
-                or scalar_cell(df, "Return on Equity %")
-                or scalar_cell(df, "Latest FY ROAE")
-                or scalar_cell(df, "ROAE")
-            )
+    ratio_dfs = tuple(d for d in [df_summary, primary, df_data] if valid_df(d))
+    data["roe"] = fetch_metric_scalar(*ratio_dfs, aliases=METRIC_ALIASES["roe"])
+    data["roce"] = fetch_metric_scalar(*ratio_dfs, aliases=METRIC_ALIASES["roce"])
+    data["de"] = fetch_metric_scalar(*ratio_dfs, aliases=METRIC_ALIASES["de"])
 
     if data.get("roe") is None:
         data["roe"] = (net_profit / eq * 100) if net_profit is not None and eq not in (None, 0) else None
+    if data.get("de") is None:
+        data["de"] = (borrowings / eq) if borrowings is not None and eq not in (None, 0) else None
     data["cfo_pat"] = (cfo / net_profit) if cfo is not None and net_profit not in (None, 0) else None
-    data["de"] = (borrowings / eq) if borrowings is not None and eq not in (None, 0) else None
-    data["pe"] = (mkt_cap / net_profit) if mkt_cap is not None and net_profit not in (None, 0) else None
+    data["pe"] = fetch_metric_scalar(*ratio_dfs, aliases=METRIC_ALIASES["pe"])
+    if data.get("pe") is None:
+        data["pe"] = (mkt_cap / net_profit) if mkt_cap is not None and net_profit not in (None, 0) else None
 
     # ── P/E ratio (from primary / summary) ──────────────────────────────────
-    for df in [df_summary, primary]:
-        if not valid_df(df):
-            continue
-        if data.get("pe") is None:
-            data["pe"] = (
-                scalar_cell(df, "PE Ratio")
-                or scalar_cell(df, "P/E")
-                or scalar_cell(df, "P/E Ratio")
-                or scalar_cell(df, "TTM P/E")
-                or scalar_cell(df, "Price to Earnings")
-            )
-        v5 = (
-            scalar_cell(df, "5 Year Avg PE")
-            or scalar_cell(df, "5-Year P/E")
-            or scalar_cell(df, "5Yr PE")
-            or scalar_cell(df, "Average PE")
-            or scalar_cell(df, "Median PE")
-        )
-        if v5 and not data.get("pe_5yr_avg"):
-            data["pe_5yr_avg"] = v5
-        if data.get("pe") and data.get("pe_5yr_avg"):
-            break
+    data["pe_5yr_avg"] = fetch_metric_scalar(*ratio_dfs, aliases=METRIC_ALIASES["pe_5yr_avg"])
 
     # ── Intrinsic valuation ──────────────────────────────────────────────────
     for df, key in [(df_dcf, "dcf_value"), (df_graham, "graham_value"), (df_dhandho, "dhandho_value")]:
         if not valid_df(df):
             data[key] = None
             continue
-        val = (
-            scalar_cell(df, "Intrinsic Value")
-            or scalar_cell(df, "Fair Value")
-            or scalar_cell(df, "DCF Value")
-            or scalar_cell(df, "Graham Value")
-            or scalar_cell(df, "Dhandho Value")
-            or scalar_cell(df, "IV")
-        )
-        data[key] = val
+        data[key] = fetch_metric_scalar(df, primary, aliases=METRIC_ALIASES["intrinsic"])
 
     data["pat_series"] = pat_series
     data["sales_series"] = sales_series
@@ -465,9 +544,15 @@ def parse_file(file) -> dict:
         "cmp": data.get("cmp"),
         "market_cap": data.get("market_cap"),
         "roe": data.get("roe"),
+        "roce": data.get("roce"),
+        "de": data.get("de"),
         "cfo": data.get("cfo"),
         "cfo_pat": data.get("cfo_pat"),
         "pe": data.get("pe"),
+        "pe_5yr_avg": data.get("pe_5yr_avg"),
+        "net_profit": data.get("net_profit_latest"),
+        "sales_points": len(sales_series),
+        "pat_points": len(pat_series),
     }, "H2")
 
     return data

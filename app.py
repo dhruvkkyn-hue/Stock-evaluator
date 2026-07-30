@@ -265,7 +265,7 @@ def parse_file(file) -> dict:
             data["market_cap"] = scalar_cell(df, "Market Capitalization") or scalar_cell(df, "Market Cap")
 
     # ── Profit & Loss ────────────────────────────────────────────────────────
-  df_for_pl = df_pl if df_pl is not None else primary
+    df_for_pl = df_pl if df_pl is not None else primary
     sales_series = row_series(df_for_pl, "Net Sales") or row_series(df_for_pl, "Revenue") or row_series(df_for_pl, "Sales")
     pat_series   = row_series(df_for_pl, "Net Profit") or row_series(df_for_pl, "PAT") or row_series(df_for_pl, "Profit after tax")
 

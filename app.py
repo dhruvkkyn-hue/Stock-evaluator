@@ -230,20 +230,36 @@ def find_sheet(sheets: dict, *keywords) -> pd.DataFrame | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_file(file) -> dict:
-    data: dict = {}
+    if file is None:
+        return {}
 
-    is_csv = file.name.endswith(".csv")
+    try:
+        # Load all sheets if Excel, or single sheet if CSV
+        if file.name.endswith('.csv'):
+            sheets = {"Data Sheet": pd.read_csv(file)}
+        else:
+            sheets = pd.read_excel(file, sheet_name=None)
+    except Exception as e:
+        return {"error": str(e)}
 
-    if is_csv:
-        try:
-            df_main = pd.read_csv(file, header=None, dtype=str)
-        except Exception as e:
-            st.error(f"Could not read CSV: {e}")
-            return data
-        sheets = {"Data Sheet": df_main}
-    else:
-        sheets = load_sheets(file)
+    df_data = sheets.get("Data Sheet")
+    df_pl = sheets.get("Profit & Loss") or sheets.get("P&L")
 
+    # Safely select primary dataframe without ambiguous truth check
+    primary = None
+    if df_data is not None and not df_data.empty:
+        primary = df_data
+    elif df_pl is not None and not df_pl.empty:
+        primary = df_pl
+    elif sheets:
+        primary = list(sheets.values())[0]
+
+    data = {
+        "primary": primary,
+        "all_sheets": sheets
+    }
+
+    return data
     # ── identify key sheets ──────────────────────────────────────────────────
     df_data    = find_sheet(sheets, "data sheet", "data")
     df_summary = find_sheet(sheets, "summary")

@@ -8,6 +8,32 @@ import re
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper Functions (Defined first to prevent NameErrors)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fmt(v, d=2, sfx=""):
+    """Safely format numeric values for the UI. Returns 'N/A' if value is None."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "N/A"
+    try:
+        return f"{float(v):,.{d}f}{sfx}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+def to_num(val):
+    """Safely convert cell value to float, handling accounting formats and units."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
+    s = re.sub(r"\s*(cr|crores?|%|x|times)\.?\s*$", "", s, flags=re.I)
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except:
+        return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Page Configuration
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -18,7 +44,7 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants & DB Initialization
+# DB Initialization
 # ─────────────────────────────────────────────────────────────────────────────
 DB_PATH = "evaluations.db"
 
@@ -34,20 +60,8 @@ def init_db():
 init_db()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Precision Data Extraction Helpers (Raw "Data Sheet" Extraction)
+# Financial Computation Engine
 # ─────────────────────────────────────────────────────────────────────────────
-
-def to_num(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
-    s = re.sub(r"\s*(cr|crores?|%|x|times)\.?\s*$", "", s, flags=re.I)
-    if s.startswith("(") and s.endswith(")"):
-        s = "-" + s[1:-1]
-    try:
-        return float(s)
-    except:
-        return None
 
 def get_row_data(df, label_query):
     label_query = label_query.lower().strip()
@@ -62,10 +76,6 @@ def get_latest_value(df, label_query):
     series = get_row_data(df, label_query)
     return series[-1] if series else None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Financial Computation Engine
-# ─────────────────────────────────────────────────────────────────────────────
-
 def parse_file(file):
     try:
         xl = pd.ExcelFile(file, engine="openpyxl")
@@ -79,7 +89,6 @@ def parse_file(file):
         return None
 
     data = {}
-    # Metadata
     try:
         data["company_name"] = str(df.iloc[0, 1]).strip()
         if data["company_name"].lower() in ["nan", "company name", "none"]:
@@ -91,7 +100,6 @@ def parse_file(file):
     data["cmp"] = get_latest_value(df, "Current Price")
     data["market_cap"] = get_latest_value(df, "Market Capitalization")
 
-    # Raw Financials
     pat = get_latest_value(df, "Net Profit")
     cfo = get_latest_value(df, "Cash from Operating Activity")
     borrowings = get_latest_value(df, "Borrowings") or 0.0
@@ -102,7 +110,6 @@ def parse_file(file):
     data["pat_series"] = get_row_data(df, "Net Profit")
     data["sales_series"] = get_row_data(df, "Sales")
 
-    # Ratio Computation
     try:
         total_equity = (eq_cap + reserves) if (eq_cap is not None and reserves is not None) else None
         data["roe"] = (pat / total_equity * 100) if (total_equity and total_equity > 0 and pat) else None
@@ -116,123 +123,85 @@ def parse_file(file):
     return data
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Dynamic Narrative Engine
+# Narrative Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_insight(metric_name, value, threshold=None):
     if value is None: return "Insufficient data to analyze this metric."
-    
     if metric_name == "ROE":
-        if value >= 20: return "✨ **Exceptional efficiency.** The business generates massive returns on shareholder capital, suggesting a strong moat."
-        if value >= 15: return "✅ **Solid efficiency.** The business creates healthy value for shareholders, meeting the quality threshold."
-        return "⚠️ **Weak efficiency.** Returns on capital are below the 15% benchmark; the business may lack a competitive advantage."
-
+        if value >= 15: return "✅ **Solid efficiency.** The business creates healthy value for shareholders."
+        return "⚠️ **Weak efficiency.** Returns on capital are below the 15% benchmark."
     if metric_name == "CFO_PAT":
-        if value >= 1.0: return "✨ **Outstanding cash conversion.** The company collects more cash than it reports as profit. High earnings quality."
-        if value >= 0.8: return "✅ **Healthy conversion.** Profits are largely backed by actual cash inflows. Clean accounting."
-        return "🚩 **Earnings Quality Warning.** Reported profits are significantly higher than cash collected. Scrutinize receivables."
-
+        if value >= 0.8: return "✅ **Healthy conversion.** Profits are largely backed by actual cash inflows."
+        return "🚩 **Earnings Quality Warning.** Reported profits are significantly higher than cash collected."
     if metric_name == "VALUATION":
-        # threshold is the 5yr Avg PE
-        if value <= threshold: return f"✅ **Attractive valuation.** Trading below the 5-year average P/E of {threshold:.1f}x."
-        if value <= threshold * 1.15: return f"🟡 **Fairly valued.** Trading at a slight premium to the historical average."
-        return f"🚩 **Stretched valuation.** Trading significantly higher than the 5-year historical norm."
-
+        if value <= threshold: return f"✅ **Attractive valuation.** Trading below the 5-year average P/E."
+        return f"🚩 **Stretched valuation.** Trading higher than the 5-year historical norm."
     return ""
 
 def generate_summary(data, score):
-    company = data.get('company_name', 'This company')
-    roe = data.get('roe', 0) or 0
-    cfo_pat = data.get('cfo_pat', 0) or 0
-    pe = data.get('pe', 0) or 0
-    avg_pe = data.get('pe_5yr_avg', 20) or 20
-    
+    company = data.get('company_name', 'The company')
     if score == 4:
-        title = "🚀 Executive Summary: Strong Compounder"
-        body = f"{company} is a high-quality business with an ROE of {roe:.1f}% and excellent cash conversion. It currently offers a margin of safety as its valuation is aligned with historical norms."
-        next_step = "Next Step: Deep dive into management commentary and sector tailwinds. This is a primary buy candidate."
-        status = "success"
+        return "🚀 Strong Compounder", f"{company} is high-quality and fairly valued.", "Next Step: Primary buy candidate.", "success"
     elif score == 3:
-        title = "⚖️ Executive Summary: Quality with Caveats"
-        body = f"{company} shows strong fundamentals but fails one critical test—likely either stretched valuation or a slight dip in cash conversion. The underlying ROE of {roe:.1f}% remains attractive."
-        next_step = "Next Step: Identify which check failed. If it's valuation, wait for a 10-15% correction. If it's cash flow, investigate the working capital cycle."
-        status = "warning"
-    else:
-        title = "⚠️ Executive Summary: High Risk / Avoid"
-        body = f"{company} currently fails multiple safety checks. With an ROE of {roe:.1f}% or poor cash conversion, the business model may be under stress or poorly managed."
-        next_step = "Next Step: Pass on this stock for now. Re-evaluate only if ROE crosses 15% and CFO/PAT improves."
-        status = "error"
-    
-    return title, body, next_step, status
+        return "⚖️ Quality with Caveats", f"{company} is strong but fails one critical check.", "Next Step: Monitor for correction.", "warning"
+    return "⚠️ High Risk / Avoid", f"{company} currently fails multiple safety checks.", "Next Step: Pass for now.", "error"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UI Implementation
+# Main Interface
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.title("🏦 Master Quantitative Risk Evaluator")
 st.markdown("---")
 
-uploaded_file = st.file_uploader("Upload Screener.in / Safal Niveshak Excel", type="xlsx", help="Upload the multi-sheet Excel export from Screener.in")
+uploaded_file = st.file_uploader("Upload Screener.in Excel", type="xlsx")
 
 col_t, col_g, col_b = st.columns(3)
 with col_t: ticker = st.text_input("Ticker Symbol", "STOCK").upper()
-with col_g: gov_verified = st.checkbox("Governance Verified", help="Check this if you have verified 0% promoter pledging and no major audit red flags.")
-with col_b: beta = st.number_input("Stock Beta", 0.0, 5.0, 1.1, help="Beta around 1.1 (±0.3) is ideal for this framework.")
+with col_g: gov_verified = st.checkbox("Governance Verified")
+with col_b: beta = st.number_input("Stock Beta", 0.0, 5.0, 1.1)
 
 if uploaded_file:
-    d = parse_file(uploaded_file)
-    if d:
-        # 1. Dashboard Metrics
-        st.header(f"🏢 {d['company_name']}")
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Current Price", f"₹{fmt(d['cmp'])}", help="The latest traded price of the stock.")
-        m2.metric("ROE %", fmt(d['roe'], 1, "%"), help="Return on Equity: Measures how effectively management uses shareholder money to generate profit. Target: >15%.")
-        m3.metric("P/E Ratio", fmt(d['pe'], 1), help="Price to Earnings: How much you pay for ₹1 of profit. Compare this to the 5Y Average.")
-        m4.metric("D/E Ratio", fmt(d['de'], 2), help="Debt to Equity: Measures financial leverage. Ideally should be <0.5 for safety.")
-        m5.metric("CFO / PAT", fmt(d['cfo_pat'], 2), help="Cash Flow from Operations divided by Net Profit. Measures earnings quality. Target: >0.8.")
-
-        # 2. Scorecard with Insights
-        st.subheader("🎯 4-Step Master Scorecard")
+    data = parse_file(uploaded_file)
+    if data:
+        # 1. Header & Metrics (Fixed NameError using 'data' and .get())
+        st.header(f"🏢 {data.get('company_name', 'Unknown Company')}")
         
-        # Logic
-        s1_pass = (d.get("roe") or 0) >= 15
-        s2_pass = (d.get("cfo_pat") or 0) >= 0.8 and (d.get("fcf") or 0) > 0
-        s3_pass = (d.get("pe") or 100) <= (d.get("pe_5yr_avg") or 20) * 1.1
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Current Price", f"₹{fmt(data.get('cmp'))}", help="The latest price.")
+        m2.metric("ROE %", fmt(data.get('roe'), 1, "%"), help="Target: >15%.")
+        m3.metric("P/E Ratio", fmt(data.get('pe'), 1), help="Price to Earnings.")
+        m4.metric("D/E Ratio", fmt(data.get('de'), 2), help="Target: <0.5.")
+        m5.metric("CFO / PAT", fmt(data.get('cfo_pat'), 2), help="Target: >0.8.")
+
+        # 2. Scorecard Logic
+        s1_pass = (data.get("roe") or 0) >= 15
+        s2_pass = (data.get("cfo_pat") or 0) >= 0.8 and (data.get("fcf") or 0) > 0
+        s3_pass = (data.get("pe") or 100) <= (data.get("pe_5yr_avg") or 20) * 1.1
         score = sum([s1_pass, s2_pass, s3_pass, gov_verified])
 
-        # Step 1: ROE
-        with st.expander(f"Step 1: Business Quality (ROE) — {'✅ PASS' if s1_pass else '❌ FAIL'}", expanded=True):
-            st.write(get_insight("ROE", d.get("roe")))
-        
-        # Step 2: CFO/PAT
-        with st.expander(f"Step 2: Cash Realism (CFO/PAT) — {'✅ PASS' if s2_pass else '❌ FAIL'}", expanded=True):
-            st.write(get_insight("CFO_PAT", d.get("cfo_pat")))
-            if (d.get("fcf") or 0) <= 0: st.write("⚠️ **Note:** Free Cash Flow is negative; the company is spending more on Capex than it earns in operating cash.")
-
-        # Step 3: Valuation
-        with st.expander(f"Step 3: Valuation Safety — {'✅ PASS' if s3_pass else '❌ FAIL'}", expanded=True):
-            st.write(get_insight("VALUATION", d.get("pe"), d.get("pe_5yr_avg")))
-
-        # Step 4: Governance
-        with st.expander(f"Step 4: Governance Shield — {'✅ PASS' if gov_verified else '❌ FAIL'}", expanded=True):
-            if gov_verified: st.write("✅ **Trust established.** Manual verification confirms clean audit and zero pledging.")
-            else: st.write("❌ **Pending Verification.** You must check Screener.in for 'Promoter Pledging' and audit qualifications.")
+        st.subheader("🎯 Master Scorecard")
+        with st.expander(f"Step 1: Business Quality — {'✅' if s1_pass else '❌'}"):
+            st.write(get_insight("ROE", data.get("roe")))
+        with st.expander(f"Step 2: Cash Realism — {'✅' if s2_pass else '❌'}"):
+            st.write(get_insight("CFO_PAT", data.get("cfo_pat")))
+        with st.expander(f"Step 3: Valuation — {'✅' if s3_pass else '❌'}"):
+            st.write(get_insight("VALUATION", data.get("pe"), data.get("pe_5yr_avg")))
+        with st.expander(f"Step 4: Governance — {'✅' if gov_verified else '❌'}"):
+            st.write("✅ Verified" if gov_verified else "❌ Pending verification")
 
         st.markdown("---")
 
-        # 3. Executive Summary Card
-        title, body, next_step, status = generate_summary(d, score)
-        if status == "success": st.success(f"### {title}\n\n{body}\n\n**{next_step}**")
-        elif status == "warning": st.warning(f"### {title}\n\n{body}\n\n**{next_step}**")
-        else: st.error(f"### {title}\n\n{body}\n\n**{next_step}**")
+        # 3. Summary
+        title, body, nxt, status = generate_summary(data, score)
+        if status == "success": st.success(f"### {title}\n{body}\n**{nxt}**")
+        elif status == "warning": st.warning(f"### {title}\n{body}\n**{nxt}**")
+        else: st.error(f"### {title}\n{body}\n**{nxt}**")
 
-        # 4. Visualization
-        with st.expander("📈 View 10-Year Growth Trends"):
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(y=d['sales_series'], name="Sales", line=dict(color='#00CC96')))
-            fig.add_trace(go.Scatter(y=d['pat_series'], name="Net Profit", line=dict(color='#636EFA')))
-            fig.update_layout(title="Sales vs Profit (Raw Cr)", hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
-
-def fmt(v, d=2, sfx=""):
-    return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
+        # 4. Chart
+        if data.get('sales_series') or data.get('pat_series'):
+            with st.expander("📈 Growth Trends"):
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(y=data.get('sales_series'), name="Sales"))
+                fig.add_trace(go.Scatter(y=data.get('pat_series'), name="Profit"))
+                st.plotly_chart(fig, use_container_width=True)

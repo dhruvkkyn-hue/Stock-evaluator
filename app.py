@@ -18,21 +18,9 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants & Paths
+# Constants & DB Initialization
 # ─────────────────────────────────────────────────────────────────────────────
-PDF_DIR = "stored_pdfs"
 DB_PATH = "evaluations.db"
-os.makedirs(PDF_DIR, exist_ok=True)
-
-TARGET_BETA = 1.10
-BETA_TOLERANCE = 0.30
-
-# Exclude these sheets from general metric searching
-EXCLUDED_SHEETS = ["instructions", "checklist", "intrinsic", "ben graham", "about", "guide", "summary"]
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SQLite & Parsing Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -40,193 +28,224 @@ def init_db():
             CREATE TABLE IF NOT EXISTS stock_evaluations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, saved_at TEXT, company_name TEXT, ticker TEXT,
                 cmp REAL, market_cap REAL, roe REAL, cfo_pat REAL, de_ratio REAL, pe_current REAL,
-                pe_5yr_avg REAL, sales_growth_10y REAL, pat_growth_10y REAL, dcf_value REAL,
-                graham_value REAL, dhandho_value REAL, step1 INTEGER, step2 INTEGER, step3 INTEGER,
-                step4 INTEGER, step5 INTEGER, total_score INTEGER, verdict TEXT, narrative TEXT, pdf_path TEXT
+                total_score INTEGER, verdict TEXT, narrative TEXT
             )""")
 
-def to_num(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)): return None
-    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
-    s = re.sub(r"\s*(cr|crores?|%|x)\.?\s*$", "", s, flags=re.I)
-    if s.startswith("(") and s.endswith(")"): s = "-" + s[1:-1]
-    try: return float(s)
-    except: return None
-
-def find_in_sheet(df, aliases, exact=False):
-    if df is None or df.empty: return None
-    aliases = [a.lower().strip() for a in aliases]
-    for r_idx in range(len(df)):
-        row = df.iloc[r_idx]
-        for c_idx in range(len(row)):
-            cell = str(row.iloc[c_idx]).lower().strip()
-            match = any(a == cell for a in aliases) if exact else any(a in cell for a in aliases)
-            if match:
-                for v in row.iloc[c_idx + 1:]:
-                    val = to_num(v)
-                    if val is not None: return val
-    return None
-
-def find_series_in_sheet(df, aliases):
-    if df is None or df.empty: return []
-    aliases = [a.lower().strip() for a in aliases]
-    for r_idx in range(len(df)):
-        row = df.iloc[r_idx]
-        for c_idx in range(len(row)):
-            cell = str(row.iloc[c_idx]).lower().strip()
-            if any(a in cell for a in aliases):
-                return [to_num(v) for v in row.iloc[c_idx + 1:] if to_num(v) is not None]
-    return []
-
-def safe_cagr(series, years):
-    if not series or len(series) < (years + 1): return None
-    try:
-        start, end = series[-(years+1)], series[-1]
-        if start > 0 and end is not None: return ((end / start)**(1/years)-1)*100
-    except: return None
-    return None
+init_db()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core Logic: Precise Parsing
+# Precise Data Extraction Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def to_num(val):
+    """Safely convert cell value to float, handling accounting formats and units."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
+    # Remove suffixes like 'Cr', 'x', '%'
+    s = re.sub(r"\s*(cr|crores?|%|x|times)\.?\s*$", "", s, flags=re.I)
+    # Handle negative values in parentheses (100) -> -100
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except:
+        return None
+
+def get_row_data(df, label_query):
+    """
+    Finds a row by searching the first column (label column) for the query string.
+    Returns a list of numeric values found in that row (excluding the label).
+    """
+    label_query = label_query.lower().strip()
+    for r_idx in range(len(df)):
+        cell_label = str(df.iloc[r_idx, 0]).lower().strip()
+        if label_query in cell_label:
+            # Extract all numeric values from the row columns (B onwards)
+            row_values = [to_num(val) for val in df.iloc[r_idx, 1:]]
+            # Filter out None values
+            return [v for v in row_values if v is not None]
+    return []
+
+def get_latest_value(df, label_query):
+    """Returns the last non-empty numeric value in a matching row."""
+    series = get_row_data(df, label_query)
+    return series[-1] if series else None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python-Based Financial Computation
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_file(file):
-    data = {}
     try:
+        # Step 1: Load "Data Sheet" specifically
         xl = pd.ExcelFile(file, engine="openpyxl")
-        sheets = {n: pd.read_excel(xl, sheet_name=n, header=None, dtype=str) for n in xl.sheet_names}
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        return None
-
-    # 1. Identify Key Sheets Strictly
-    df_data = next((v for k, v in sheets.items() if "data sheet" in k.lower()), None)
-    df_pl   = next((v for k, v in sheets.items() if any(x in k.lower() for x in ["p&l", "profit", "income"])), None)
-    df_bs   = next((v for k, v in sheets.items() if "balance" in k.lower()), None)
-    df_cf   = next((v for k, v in sheets.items() if "cash" in k.lower()), None)
-    df_ratios = next((v for k, v in sheets.items() if "ratio" in k.lower()), None)
-
-    # 2. Extract Metadata Strictly from "Data Sheet"
-    if df_data is not None:
-        # Company Name: Try cell B1 (0,1) or find "Company Name" label
-        try:
-            name_label = find_in_sheet(df_data, ["company name"])
-            data["company_name"] = str(df_data.iloc[0, 1]).strip() if name_label is None else str(name_label)
-        except: data["company_name"] = "Unknown Company"
+        sheet_names = xl.sheet_names
+        data_sheet_name = next((s for s in sheet_names if "data sheet" in s.lower()), None)
         
-        data["cmp"] = find_in_sheet(df_data, ["current price", "cmp"], exact=False)
-        data["market_cap"] = find_in_sheet(df_data, ["market capitalization", "market cap"], exact=False)
-    else:
-        st.error("Sheet named 'Data Sheet' not found. Please use a valid Screener/Safal Niveshak export.")
+        if not data_sheet_name:
+            st.error("Could not find 'Data Sheet' in the uploaded file.")
+            return None
+            
+        df = pd.read_excel(xl, sheet_name=data_sheet_name, header=None, dtype=str)
+    except Exception as e:
+        st.error(f"Error loading Excel: {e}")
         return None
 
-    # 3. Extract Raw Series for Calculation
-    sales_series = find_series_in_sheet(df_pl, ["sales", "revenue", "net sales"])
-    pat_series   = find_series_in_sheet(df_pl, ["net profit", "pat", "profit after tax"])
-    cfo_series   = find_series_in_sheet(df_cf, ["cash from operating", "operating cash flow", "cfo"])
-    
-    # Balance Sheet Items (Latest Year)
-    equity_cap = find_in_sheet(df_bs, ["equity share capital", "share capital"])
-    reserves   = find_in_sheet(df_bs, ["reserves"])
-    borrowings = find_in_sheet(df_bs, ["borrowings", "total debt", "long term borrowings"]) or 0.0
-    
-    # 4. Calculate Financial Ratios Accurately
-    latest_pat = pat_series[-1] if pat_series else None
-    latest_equity = (equity_cap + reserves) if (equity_cap is not None and reserves is not None) else None
-    
-    # ROE Calculation
-    if latest_pat and latest_equity and latest_equity > 0:
-        data["roe"] = (latest_pat / latest_equity) * 100
-    else:
-        # Fallback to Key Ratios sheet only if raw calc fails
-        data["roe"] = find_in_sheet(df_ratios, ["return on equity", "roe"])
+    data = {}
 
-    # D/E Calculation
-    if latest_equity and latest_equity > 0:
-        data["de"] = borrowings / latest_equity
-    else:
-        data["de"] = find_in_sheet(df_ratios, ["debt to equity", "debt/equity"])
+    # 2. Extract Basic Metadata
+    try:
+        # Usually Company name is in B1 (0,1)
+        name_val = df.iloc[0, 1]
+        data["company_name"] = str(name_val).strip() if pd.notna(name_val) else "Unknown"
+        if data["company_name"].lower() in ["nan", "company name", "none"]:
+            # Alternative: Search for a row labeled "Company Name"
+            for r in range(5):
+                if "company name" in str(df.iloc[r, 0]).lower():
+                    data["company_name"] = str(df.iloc[r, 1]).strip()
+    except:
+        data["company_name"] = "Unknown"
 
-    # P/E Calculation
-    if data["market_cap"] and latest_pat and latest_pat > 0:
-        data["pe"] = data["market_cap"] / latest_pat
-    else:
-        data["pe"] = find_in_sheet(df_data, ["stock p/e", "p/e"])
+    # Extraction of static metadata points
+    data["cmp"] = get_latest_value(df, "Current Price")
+    data["market_cap"] = get_latest_value(df, "Market Capitalization")
 
-    # CFO / PAT Ratio
-    if cfo_series and pat_series and pat_series[-1] != 0:
-        data["cfo_pat"] = cfo_series[-1] / pat_series[-1]
-    else: data["cfo_pat"] = None
+    # 3. Extract Latest Year Raw Financials (Last cell in row)
+    pat = get_latest_value(df, "Net Profit")
+    sales = get_latest_value(df, "Sales")
+    cfo = get_latest_value(df, "Cash from Operating Activity")
+    borrowings = get_latest_value(df, "Borrowings") or 0.0
+    eq_cap = get_latest_value(df, "Equity Share Capital")
+    reserves = get_latest_value(df, "Reserves")
 
-    # Growth & Intrinsic Values (Secondary Sheets)
-    data["sales_growth_10y"] = safe_cagr(sales_series, 10)
-    data["pat_growth_10y"]   = safe_cagr(pat_series, 10)
-    data["pe_5yr_avg"] = find_in_sheet(df_data, ["5 year avg pe", "median pe"])
-    
-    df_val = next((v for k, v in sheets.items() if any(x in k.lower() for x in ["dcf", "valuation"])), None)
-    data["dcf_value"] = find_in_sheet(df_val, ["dcf value", "intrinsic value"])
-    data["graham_value"] = find_in_sheet(sheets.get("Ben Graham Formula"), ["graham value", "ben graham value"])
-    
-    data["pat_series"] = pat_series
-    data["sales_series"] = sales_series
-    data["fcf"] = (cfo_series[-1] - abs(find_in_sheet(df_cf, ["fixed assets purchased", "capex"]) or 0)) if cfo_series else None
+    # Store series for charts
+    data["pat_series"] = get_row_data(df, "Net Profit")
+    data["sales_series"] = get_row_data(df, "Sales")
+
+    # 4. Compute Ratios Dynamically in Python (Avoids reading NaN formulas)
+    try:
+        total_equity = None
+        if eq_cap is not None and reserves is not None:
+            total_equity = eq_cap + reserves
+
+        # ROE calculation
+        if total_equity and total_equity > 0 and pat is not None:
+            data["roe"] = (pat / total_equity) * 100
+        else:
+            data["roe"] = None
+
+        # P/E calculation
+        if data["market_cap"] and pat and pat > 0:
+            data["pe"] = data["market_cap"] / pat
+        else:
+            data["pe"] = None
+
+        # Debt to Equity calculation
+        if total_equity and total_equity > 0:
+            data["de"] = borrowings / total_equity
+        else:
+            data["de"] = 0.0 if borrowings == 0 else None
+
+        # CFO / PAT calculation
+        if cfo is not None and pat and pat != 0:
+            data["cfo_pat"] = cfo / pat
+        else:
+            data["cfo_pat"] = None
+            
+        # Free Cash Flow (CFO - Capex) - Approximated
+        capex = get_latest_value(df, "Fixed assets purchased") or 0
+        data["fcf"] = (cfo - abs(capex)) if cfo is not None else None
+
+    except Exception as e:
+        st.warning(f"Ratio calculation error: {e}")
+
+    # Fallbacks for specific multi-year averages
+    data["pe_5yr_avg"] = get_latest_value(df, "5 Year Avg PE") or get_latest_value(df, "Median PE")
 
     return data
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UI & Scorecard
+# UI Logic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_scorecard(data, gov_ok, beta):
+def run_scorecard(data, gov_ok):
     s1 = 1 if (data.get("roe") or 0) >= 15 else 0
     s2 = 1 if ((data.get("cfo_pat") or 0) >= 0.8 and (data.get("fcf") or 0) > 0) else 0
-    s3 = 1 if (data.get("pe") or 0) <= (data.get("pe_5yr_avg") or 999) * 1.1 else 0
+    # Step 3: Valuation check (PE within 10% of 5yr average)
+    avg_pe = data.get("pe_5yr_avg") or 20
+    s3 = 1 if (data.get("pe") or 100) <= (avg_pe * 1.1) else 0
     s4 = 1 if gov_ok else 0
-    s5 = 1 if abs(beta - TARGET_BETA) <= BETA_TOLERANCE else 0
     
-    steps = [s1, s2, s3, s4, s5]
-    return {"total": sum(steps), "steps": steps}
+    score = s1 + s2 + s3 + s4
+    return {"total": score, "steps": [s1, s2, s3, s4]}
 
 def fmt(v, d=2, sfx=""):
     return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main Interface
+# Main Streamlit App
 # ─────────────────────────────────────────────────────────────────────────────
 
-init_db()
 st.title("🏦 Master Quantitative Risk Evaluator")
+st.caption("Calculated dynamically from 'Data Sheet' raw figures.")
 
-up = st.file_uploader("Upload Screener Export (Data Sheet required)", type="xlsx")
-c1, c2, c3 = st.columns(3)
-with c1: ticker = st.text_input("Ticker", "STOCK").upper()
-with c2: gov = st.checkbox("Clean Governance Verified")
-with c3: beta = st.number_input("Beta", 0.0, 5.0, 1.1)
+uploaded_file = st.file_uploader("Upload Screener.in / Safal Niveshak Excel", type="xlsx")
 
-if up:
-    d = parse_file(up)
+col1, col2 = st.columns(2)
+with col1: ticker = st.text_input("Ticker Symbol", "STOCK").upper()
+with col2: gov_verified = st.checkbox("Verified: 0% Pledge & Clean Audit")
+
+if uploaded_file:
+    with st.spinner("Processing Raw Financials..."):
+        d = parse_file(uploaded_file)
+        
     if d:
-        sc = run_scorecard(d, gov, beta)
+        sc = run_scorecard(d, gov_verified)
         
+        # Dashboard Header
         st.header(f"🏢 {d['company_name']}")
-        cols = st.columns(5)
-        cols[0].metric("Price", fmt(d['cmp']))
-        cols[1].metric("ROE %", fmt(d['roe'], 1, "%"))
-        cols[2].metric("D/E", fmt(d['de'], 2))
-        cols[3].metric("P/E", fmt(d['pe'], 1))
-        cols[4].metric("CFO/PAT", fmt(d['cfo_pat'], 2))
-
-        st.subheader("Framework Scorecard")
-        st.write(f"**Step 1: ROE ≥ 15%** {'✅' if sc['steps'][0] else '❌'} ({fmt(d['roe'],1)}%)")
-        st.write(f"**Step 2: Cash Realism** {'✅' if sc['steps'][1] else '❌'} (CFO/PAT: {fmt(d['cfo_pat'])})")
-        st.write(f"**Step 3: Valuation** {'✅' if sc['steps'][2] else '❌'} (Current PE: {fmt(d['pe'])})")
-        st.write(f"**Step 4: Governance** {'✅' if sc['steps'][3] else '❌'}")
-        st.write(f"**Step 5: Beta (~1.1)** {'✅' if sc['steps'][4] else '❌'} ({beta})")
         
-        score = sc['total']
-        if score >= 4: st.success(f"### APPROVED ({score}/5)")
-        else: st.error(f"### REJECTED ({score}/5)")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Price", fmt(d['cmp']))
+        m2.metric("ROE %", fmt(d['roe'], 1, "%"))
+        m3.metric("P/E Ratio", fmt(d['pe'], 1))
+        m4.metric("D/E Ratio", fmt(d['de'], 2))
+        m5.metric("CFO / PAT", fmt(d['cfo_pat'], 2))
 
-        with st.expander("View Raw Financial Series"):
-            st.write("**PAT Series:**", d['pat_series'])
-            st.write("**Sales Series:**", d['sales_series'])
+        st.divider()
+
+        # Scorecard Result
+        st.subheader("Framework Scorecard")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write(f"**Step 1: Business Quality (ROE ≥ 15%)** — {'✅ PASS' if sc['steps'][0] else '❌ FAIL'}")
+            st.write(f"**Step 2: Cash Realism (CFO/PAT ≥ 0.8)** — {'✅ PASS' if sc['steps'][1] else '❌ FAIL'}")
+        with c2:
+            st.write(f"**Step 3: Valuation (P/E Safety)** — {'✅ PASS' if sc['steps'][2] else '❌ FAIL'}")
+            st.write(f"**Step 4: Governance Verified** — {'✅ PASS' if sc['steps'][3] else '❌ FAIL'}")
+
+        score = sc['total']
+        if score == 4:
+            st.success(f"### APPROVED / LOCKED IN ({score}/4)")
+        elif score == 3:
+            st.warning(f"### POTENTIAL / WATCHLIST ({score}/4)")
+        else:
+            st.error(f"### REJECTED ({score}/4)")
+
+        # Historical Growth Expansion
+        with st.expander("View Historical Raw Trends"):
+            fig = go.Figure()
+            if d['sales_series']:
+                fig.add_trace(go.Scatter(y=d['sales_series'], name="Sales (Cr)", mode='lines+markers'))
+            if d['pat_series']:
+                fig.add_trace(go.Scatter(y=d['pat_series'], name="Net Profit (Cr)", mode='lines+markers'))
+            fig.update_layout(title="Raw P&L Trend (10 Years)", template="plotly_white")
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Raw data table
+            st.table(pd.DataFrame({
+                "Metric": ["Price", "Market Cap", "ROE", "P/E", "D/E", "CFO/PAT", "FCF (Cr)"],
+                "Calculated Value": [fmt(d['cmp']), fmt(d['market_cap']), fmt(d['roe'], 1, "%"), 
+                                     fmt(d['pe'], 1), fmt(d['de'], 2), fmt(d['cfo_pat'], 2), fmt(d['fcf'])]
+            }))

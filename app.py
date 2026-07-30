@@ -724,7 +724,7 @@ with tab_eval:
         # Metrics & scorecard
         scorecard = run_scorecard(data, governance_ok, beta_value)
         def build_narrative(data: dict, scorecard: dict) -> dict:
-        df_raw = data.get("primary") if data.get("primary") is not None else (
+    df_raw = data.get("primary") if data.get("primary") is not None else (
         data.get("all_sheets", {}).get("Data Sheet")
     )
 

@@ -255,7 +255,13 @@ def parse_file(file) -> dict:
     df_bs      = find_sheet(sheets, "balance sheet", "balance")
 
     # Fall back to first sheet if data sheet not found
-    primary = df_data or df_pl or (list(sheets.values())[0] if sheets else None)
+    primary = None
+if df_data is not None and not df_data.empty:
+    primary = df_data
+elif df_pl is not None and not df_pl.empty:
+    primary = df_pl
+elif sheets:
+    primary = list(sheets.values())[0]
 
     if primary is None:
         st.error("No readable sheet found in the uploaded file.")

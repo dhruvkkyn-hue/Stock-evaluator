@@ -10,6 +10,7 @@ import os
 import shutil
 import datetime
 import json
+import re
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -118,49 +119,79 @@ init_db()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def to_num(val):
-    """Convert a cell value to float, return None on failure."""
-    if val is None:
+    """Convert a cell value to float; handles Screener formats (₹, Cr, %, x)."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
+    s = str(val).strip()
+    if not s or s.lower() in ("na", "n/a", "-", "—", "nan", "none", "#n/a"):
+        return None
+    s = s.replace("\u20b9", "").replace("₹", "").replace("Rs.", "").replace("Rs", "")
+    s = s.replace(",", "")
+    s = re.sub(r"\s*(cr|crores?|lakh|lac|%|x|×|times|inr)\.?\s*$", "", s, flags=re.I)
+    s = s.strip()
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
     try:
-        return float(str(val).replace(",", "").replace("%", "").strip())
+        return float(s)
     except (ValueError, TypeError):
+        match = re.search(r"-?\d+(?:\.\d+)?", s)
+        if match:
+            try:
+                return float(match.group())
+            except ValueError:
+                pass
         return None
 
 
 def find_row(df: pd.DataFrame, label: str):
-    """Return the row (Series) whose first cell contains label."""
+    """Return (row, label_col_index) for the first row containing label in any cell."""
+    label_lower = label.lower()
+    best_row, best_col = None, None
     for _, row in df.iterrows():
-        if label.lower() in str(row.iloc[0]).lower():
-            return row
-    return None
+        for i, cell in enumerate(row):
+            cell_s = str(cell).strip().lower()
+            if cell_s in ("nan", "none", ""):
+                continue
+            if label_lower in cell_s:
+                if best_row is None or i < best_col:
+                    best_row, best_col = row, i
+    if best_row is None:
+        return None, None
+    return best_row, best_col
 
 
 def row_latest(df: pd.DataFrame, label: str):
     """Return the rightmost numeric value in a row matching label."""
-    row = find_row(df, label)
-    if row is None:
-        return None
-    nums = [to_num(v) for v in row.iloc[1:] if to_num(v) is not None]
+    nums = row_series(df, label)
     return nums[-1] if nums else None
 
 
 def row_series(df: pd.DataFrame, label: str):
     """Return all numeric values (left→right) for a row matching label."""
-    row = find_row(df, label)
+    row, label_col = find_row(df, label)
     if row is None:
         return []
-    return [to_num(v) for v in row.iloc[1:] if to_num(v) is not None]
+    start = label_col + 1
+    return [to_num(v) for v in row.iloc[start:] if to_num(v) is not None]
 
 
-def scalar_cell(df: pd.DataFrame, label: str, col_idx: int = 1):
-    """Return value at col_idx from the first row matching label."""
-    row = find_row(df, label)
+def scalar_cell(df: pd.DataFrame, label: str, col_idx: int | None = None):
+    """Return the first numeric value after the label cell in a matching row."""
+    row, label_col = find_row(df, label)
     if row is None:
         return None
-    try:
-        return to_num(row.iloc[col_idx])
-    except IndexError:
-        return None
+    if col_idx is not None:
+        try:
+            val = to_num(row.iloc[col_idx])
+            if val is not None:
+                return val
+        except IndexError:
+            pass
+    for v in row.iloc[label_col + 1:]:
+        val = to_num(v)
+        if val is not None:
+            return val
+    return None
 
 
 def cagr(start, end, years):
@@ -213,26 +244,6 @@ def parse_file(file) -> dict:
     else:
         sheets = load_sheets(file)
 
-    if not sheets:
-        return data
-
-    # Clean, Pandas-safe logic for finding primary & df_pl sheets
-    df_data = sheets.get("Data Sheet") if sheets.get("Data Sheet") is not None else sheets.get("Data")
-    df_pl = sheets.get("Profit & Loss") if sheets.get("Profit & Loss") is not None else sheets.get("P&L")
-
-    # Pick primary safely
-    primary = df_data if df_data is not None else (df_pl if df_pl is not None else list(sheets.values())[0])
-
-    # Pick df_for_pl safely
-    df_for_pl = df_pl if df_pl is not None else primary
-
-    # Store them in your data dictionary
-    data["primary"] = primary
-    data["pl"] = df_for_pl
-    data["all_sheets"] = sheets
-
-    return data
-
     # ── identify key sheets ──────────────────────────────────────────────────
     df_data    = find_sheet(sheets, "data sheet", "data")
     df_summary = find_sheet(sheets, "summary")
@@ -244,7 +255,7 @@ def parse_file(file) -> dict:
     df_bs      = find_sheet(sheets, "balance sheet", "balance")
 
     # Fall back to first sheet if data sheet not found
-    primary = df_data if df_data is not None else (df_pl if df_pl is not None else (list(sheets.values())[0] if sheets else None))
+    primary = df_data or df_pl or (list(sheets.values())[0] if sheets else None)
 
     if primary is None:
         st.error("No readable sheet found in the uploaded file.")
@@ -260,12 +271,21 @@ def parse_file(file) -> dict:
         if df is None:
             continue
         if not data.get("cmp"):
-            data["cmp"] = scalar_cell(df, "Current Price") or scalar_cell(df, "CMP") or scalar_cell(df, "Market Price")
+            data["cmp"] = (
+                scalar_cell(df, "Current Price")
+                or scalar_cell(df, "Current Price (INR)")
+                or scalar_cell(df, "CMP")
+                or scalar_cell(df, "Market Price")
+            )
         if not data.get("market_cap"):
-            data["market_cap"] = scalar_cell(df, "Market Capitalization") or scalar_cell(df, "Market Cap")
+            data["market_cap"] = (
+                scalar_cell(df, "Market Capitalization")
+                or scalar_cell(df, "Market Cap")
+                or scalar_cell(df, "Market Cap (Cr)")
+            )
 
     # ── Profit & Loss ────────────────────────────────────────────────────────
-    df_for_pl = df_pl if df_pl is not None else primary
+    df_for_pl = df_pl or primary
     sales_series = row_series(df_for_pl, "Net Sales") or row_series(df_for_pl, "Revenue") or row_series(df_for_pl, "Sales")
     pat_series   = row_series(df_for_pl, "Net Profit") or row_series(df_for_pl, "PAT") or row_series(df_for_pl, "Profit after tax")
 
@@ -310,7 +330,14 @@ def parse_file(file) -> dict:
 
     # ── Cash Flow ────────────────────────────────────────────────────────────
     df_for_cf = df_cf or primary
-    cfo_series = row_series(df_for_cf, "Cash from Operating") or row_series(df_for_cf, "Operating Cash") or row_series(df_for_cf, "CFO")
+    cfo_series = (
+        row_series(df_for_cf, "Cash from Operating")
+        or row_series(df_for_cf, "Cash from Operations")
+        or row_series(df_for_cf, "Cash from Operating Activity")
+        or row_series(df_for_cf, "Net Cash from Operating")
+        or row_series(df_for_cf, "Operating Cash")
+        or row_series(df_for_cf, "CFO")
+    )
     fcf_series = row_series(df_for_cf, "Free Cash Flow") or row_series(df_for_cf, "FCF")
 
     data["cfo"] = cfo_series[-1] if cfo_series else None
@@ -327,18 +354,43 @@ def parse_file(file) -> dict:
     eq         = shareholder_equity
     mkt_cap    = data.get("market_cap")
 
-    data["roe"]     = (net_profit / eq * 100)       if net_profit and eq else None
-    data["cfo_pat"] = (cfo / net_profit)             if cfo and net_profit and net_profit != 0 else None
-    data["de"]      = (borrowings / eq)              if borrowings is not None and eq else None
-    data["pe"]      = (mkt_cap / net_profit)         if mkt_cap and net_profit and net_profit != 0 else None
+    for df in [df_summary, primary]:
+        if df is None:
+            continue
+        if data.get("roe") is None:
+            data["roe"] = (
+                scalar_cell(df, "ROE")
+                or scalar_cell(df, "Return on Equity")
+                or scalar_cell(df, "Return on Equity %")
+                or scalar_cell(df, "Latest FY ROAE")
+                or scalar_cell(df, "ROAE")
+            )
+
+    if data.get("roe") is None:
+        data["roe"] = (net_profit / eq * 100) if net_profit and eq else None
+    data["cfo_pat"] = (cfo / net_profit) if cfo and net_profit and net_profit != 0 else None
+    data["de"]      = (borrowings / eq) if borrowings is not None and eq else None
+    data["pe"]      = (mkt_cap / net_profit) if mkt_cap and net_profit and net_profit != 0 else None
 
     # ── P/E ratio (from primary / summary) ──────────────────────────────────
     for df in [df_summary, primary]:
         if df is None:
             continue
         if data.get("pe") is None:
-            data["pe"] = scalar_cell(df, "PE Ratio") or scalar_cell(df, "P/E") or scalar_cell(df, "Price to Earnings")
-        v5 = scalar_cell(df, "5 Year Avg PE") or scalar_cell(df, "5-Year P/E") or scalar_cell(df, "5Yr PE") or scalar_cell(df, "Average PE")
+            data["pe"] = (
+                scalar_cell(df, "PE Ratio")
+                or scalar_cell(df, "P/E")
+                or scalar_cell(df, "P/E Ratio")
+                or scalar_cell(df, "TTM P/E")
+                or scalar_cell(df, "Price to Earnings")
+            )
+        v5 = (
+            scalar_cell(df, "5 Year Avg PE")
+            or scalar_cell(df, "5-Year P/E")
+            or scalar_cell(df, "5Yr PE")
+            or scalar_cell(df, "Average PE")
+            or scalar_cell(df, "Median PE")
+        )
         if v5 and not data.get("pe_5yr_avg"):
             data["pe_5yr_avg"] = v5
         if data.get("pe") and data.get("pe_5yr_avg"):
@@ -416,45 +468,22 @@ def run_scorecard(data: dict, governance_ok: bool, beta_value: float) -> dict:
 # Plain-English Narrative Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
-# 1. Access sheet safely
-    df_raw = data.get("primary") if data.get("primary") is not None else (
-        data.get("all_sheets", {}).get("Data Sheet")
-    )
-
-    # 2. Row fetcher helper
-    def fetch_metric(label):
-        if df_raw is None:
-            return None
-        df_str = df_raw.fillna("").astype(str)
-        for idx, row in df_str.iterrows():
-            first_col = row[0].strip().lower()
-            if label.lower() in first_col:
-                values = [val.strip() for val in row[1:] if val.strip() != ""]
-                if values:
-                    try:
-                        return float(values[-1].replace(",", ""))
-                    except ValueError:
-                        return values[-1]
-        return None
-
-    # 3. Pull metrics dynamically from sheet rows
-    cmp       = fetch_metric("Current Price") or data.get("cmp")
-    roe       = fetch_metric("Return on Equity") or data.get("roe")
-    cfo_val   = fetch_metric("Cash from Operating Activity") or data.get("cfo")
-    de        = fetch_metric("Debt/Equity") or data.get("de")
-    pe        = fetch_metric("Price to Earning") or data.get("pe")
-    company   = data.get("company_name") or fetch_metric("COMPANY NAME") or "This company"
-
-    # Fallbacks for calculated/trend metrics
+def build_narrative(data: dict, scorecard: dict) -> dict:
+    roe       = data.get("roe")
     cfo_pat   = data.get("cfo_pat")
+    de        = data.get("de")
+    pe        = data.get("pe")
     pe_5avg   = data.get("pe_5yr_avg")
     sg10      = data.get("sales_growth_10y")
     pg10      = data.get("pat_growth_10y")
     pg3       = data.get("pat_growth_3y")
+    cmp       = data.get("cmp")
     dcf       = data.get("dcf_value")
     graham    = data.get("graham_value")
     dhandho   = data.get("dhandho_value")
+    company   = data.get("company_name", "This company")
     capex     = data.get("capex_latest")
+    cfo_val   = data.get("cfo")
 
     def fmt(v, d=1, sfx=""):
         return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
@@ -723,131 +752,6 @@ with tab_eval:
 
         # Metrics & scorecard
         scorecard = run_scorecard(data, governance_ok, beta_value)
-        def build_narrative(data: dict, scorecard: dict) -> dict:
-    df_raw = data.get("primary") if data.get("primary") is not None else (
-        data.get("all_sheets", {}).get("Data Sheet")
-    )
-
-    def fetch_metric(label):
-        if df_raw is None:
-            return None
-        df_str = df_raw.fillna("").astype(str)
-        for idx, row in df_str.iterrows():
-            first_col = row[0].strip().lower()
-            if label.lower() in first_col:
-                values = [val.strip() for val in row[1:] if val.strip() != ""]
-                if values:
-                    try:
-                        return float(values[-1].replace(",", ""))
-                    except ValueError:
-                        return values[-1]
-        return None
-
-    cmp       = fetch_metric("Current Price") or data.get("cmp")
-    roe       = fetch_metric("Return on Equity") or data.get("roe")
-    cfo_val   = fetch_metric("Cash from Operating Activity") or data.get("cfo")
-    de        = fetch_metric("Debt/Equity") or data.get("de")
-    pe        = fetch_metric("Price to Earning") or data.get("pe")
-    company   = data.get("company_name") or fetch_metric("COMPANY NAME") or "This company"
-
-    cfo_pat   = data.get("cfo_pat")
-    pe_5avg   = data.get("pe_5yr_avg")
-    sg10      = data.get("sales_growth_10y")
-    pg10      = data.get("pat_growth_10y")
-    pg3       = data.get("pat_growth_3y")
-    dcf       = data.get("dcf_value")
-    graham    = data.get("graham_value")
-    dhandho   = data.get("dhandho_value")
-    capex     = data.get("capex_latest")
-
-    def fmt(v, d=1, sfx=""):
-        return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
-
-    strengths = []
-    weaknesses = []
-    red_flags = []
-
-    if roe and isinstance(roe, (int, float)) and roe >= 15:
-        strengths.append(f"Strong business quality with high Return on Equity ({fmt(roe, 1, '%')}).")
-    elif roe and isinstance(roe, (int, float)):
-        weaknesses.append(f"ROE of {fmt(roe, 1, '%')} is below the 15% benchmark.")
-
-    if de and isinstance(de, (int, float)) and de <= 0.5:
-        strengths.append(f"Conservative capital structure with low Debt/Equity ({fmt(de, 2, 'x')}).")
-    elif de and isinstance(de, (int, float)) and de > 1.0:
-        red_flags.append(f"High financial leverage with Debt/Equity of {fmt(de, 2, 'x')}.")
-
-    return {
-        "strengths": strengths or ["Insufficient data to identify quantitative strengths."],
-        "weaknesses": weaknesses or ["No major quantitative weaknesses identified based on available data."],
-        "red_flags": red_flags or ["No major red flags identified from the quantitative data."],
-        "verdict": f"Evaluation completed for {company}."
-    }
-        def build_narrative(data: dict, scorecard: dict) -> dict:
-    # 1. Access sheet safely
-    df_raw = data.get("primary") if data.get("primary") is not None else (
-        data.get("all_sheets", {}).get("Data Sheet")
-    )
-
-    # 2. Row fetcher helper
-    def fetch_metric(label):
-        if df_raw is None:
-            return None
-        df_str = df_raw.fillna("").astype(str)
-        for idx, row in df_str.iterrows():
-            first_col = row[0].strip().lower()
-            if label.lower() in first_col:
-                values = [val.strip() for val in row[1:] if val.strip() != ""]
-                if values:
-                    try:
-                        return float(values[-1].replace(",", ""))
-                    except ValueError:
-                        return values[-1]
-        return None
-
-    # 3. Pull metrics dynamically from sheet rows
-    cmp       = fetch_metric("Current Price") or data.get("cmp")
-    roe       = fetch_metric("Return on Equity") or data.get("roe")
-    cfo_val   = fetch_metric("Cash from Operating Activity") or data.get("cfo")
-    de        = fetch_metric("Debt/Equity") or data.get("de")
-    pe        = fetch_metric("Price to Earning") or data.get("pe")
-    company   = data.get("company_name") or fetch_metric("COMPANY NAME") or "This company"
-
-    # Fallbacks for calculated/trend metrics
-    cfo_pat   = data.get("cfo_pat")
-    pe_5avg   = data.get("pe_5yr_avg")
-    sg10      = data.get("sales_growth_10y")
-    pg10      = data.get("pat_growth_10y")
-    pg3       = data.get("pat_growth_3y")
-    dcf       = data.get("dcf_value")
-    graham    = data.get("graham_value")
-    dhandho   = data.get("dhandho_value")
-    capex     = data.get("capex_latest")
-
-    def fmt(v, d=1, sfx=""):
-        return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
-
-    strengths = []
-    weaknesses = []
-    red_flags = []
-
-    # Simple narrative logic
-    if roe and isinstance(roe, (int, float)) and roe >= 15:
-        strengths.append(f"Strong business quality with high Return on Equity ({fmt(roe, 1, '%')}).")
-    elif roe and isinstance(roe, (int, float)):
-        weaknesses.append(f"ROE of {fmt(roe, 1, '%')} is below the 15% benchmark.")
-
-    if de and isinstance(de, (int, float)) and de <= 0.5:
-        strengths.append(f"Conservative capital structure with low Debt/Equity ({fmt(de, 2, 'x')}).")
-    elif de and isinstance(de, (int, float)) and de > 1.0:
-        red_flags.append(f"High financial leverage with Debt/Equity of {fmt(de, 2, 'x')}.")
-
-    return {
-        "strengths": strengths or ["Insufficient data to identify quantitative strengths."],
-        "weaknesses": weaknesses or ["No major quantitative weaknesses identified based on available data."],
-        "red_flags": red_flags or ["No major red flags identified from the quantitative data."],
-        "verdict": f"Evaluation completed for {company}."
-    }
         narrative = build_narrative(data, scorecard)
 
         # ── Header ────────────────────────────────────────────────────────────

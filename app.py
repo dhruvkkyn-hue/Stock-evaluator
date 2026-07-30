@@ -217,7 +217,7 @@ def parse_file(file) -> dict:
         return data
 
     # Clean, Pandas-safe logic for finding primary & df_pl sheets
-    df_data = sheets.get("Data Sheet") or sheets.get("Data")
+    df_data = sheets.get("Data Sheet") if sheets.get("Data Sheet") is not None else sheets.get("Data")
     df_pl = sheets.get("Profit & Loss") if sheets.get("Profit & Loss") is not None else sheets.get("P&L")
 
     # Pick primary safely

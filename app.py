@@ -213,6 +213,26 @@ def parse_file(file) -> dict:
     else:
         sheets = load_sheets(file)
 
+    if not sheets:
+        return data
+
+    # Clean, Pandas-safe logic for finding primary & df_pl sheets
+    df_data = sheets.get("Data Sheet") or sheets.get("Data")
+    df_pl = sheets.get("Profit & Loss") if sheets.get("Profit & Loss") is not None else sheets.get("P&L")
+
+    # Pick primary safely
+    primary = df_data if df_data is not None else (df_pl if df_pl is not None else list(sheets.values())[0])
+
+    # Pick df_for_pl safely
+    df_for_pl = df_pl if df_pl is not None else primary
+
+    # Store them in your data dictionary
+    data["primary"] = primary
+    data["pl"] = df_for_pl
+    data["all_sheets"] = sheets
+
+    return data
+
     # ── identify key sheets ──────────────────────────────────────────────────
     df_data    = find_sheet(sheets, "data sheet", "data")
     df_summary = find_sheet(sheets, "summary")

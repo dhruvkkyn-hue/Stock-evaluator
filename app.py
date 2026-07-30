@@ -416,22 +416,45 @@ def run_scorecard(data: dict, governance_ok: bool, beta_value: float) -> dict:
 # Plain-English Narrative Engine
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_narrative(data: dict, scorecard: dict) -> dict:
-    roe       = data.get("roe")
+# 1. Access sheet safely
+    df_raw = data.get("primary") if data.get("primary") is not None else (
+        data.get("all_sheets", {}).get("Data Sheet")
+    )
+
+    # 2. Row fetcher helper
+    def fetch_metric(label):
+        if df_raw is None:
+            return None
+        df_str = df_raw.fillna("").astype(str)
+        for idx, row in df_str.iterrows():
+            first_col = row[0].strip().lower()
+            if label.lower() in first_col:
+                values = [val.strip() for val in row[1:] if val.strip() != ""]
+                if values:
+                    try:
+                        return float(values[-1].replace(",", ""))
+                    except ValueError:
+                        return values[-1]
+        return None
+
+    # 3. Pull metrics dynamically from sheet rows
+    cmp       = fetch_metric("Current Price") or data.get("cmp")
+    roe       = fetch_metric("Return on Equity") or data.get("roe")
+    cfo_val   = fetch_metric("Cash from Operating Activity") or data.get("cfo")
+    de        = fetch_metric("Debt/Equity") or data.get("de")
+    pe        = fetch_metric("Price to Earning") or data.get("pe")
+    company   = data.get("company_name") or fetch_metric("COMPANY NAME") or "This company"
+
+    # Fallbacks for calculated/trend metrics
     cfo_pat   = data.get("cfo_pat")
-    de        = data.get("de")
-    pe        = data.get("pe")
     pe_5avg   = data.get("pe_5yr_avg")
     sg10      = data.get("sales_growth_10y")
     pg10      = data.get("pat_growth_10y")
     pg3       = data.get("pat_growth_3y")
-    cmp       = data.get("cmp")
     dcf       = data.get("dcf_value")
     graham    = data.get("graham_value")
     dhandho   = data.get("dhandho_value")
-    company   = data.get("company_name", "This company")
     capex     = data.get("capex_latest")
-    cfo_val   = data.get("cfo")
 
     def fmt(v, d=1, sfx=""):
         return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"

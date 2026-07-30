@@ -723,6 +723,71 @@ with tab_eval:
 
         # Metrics & scorecard
         scorecard = run_scorecard(data, governance_ok, beta_value)
+        def build_narrative(data: dict, scorecard: dict) -> dict:
+    # 1. Access sheet safely
+    df_raw = data.get("primary") if data.get("primary") is not None else (
+        data.get("all_sheets", {}).get("Data Sheet")
+    )
+
+    # 2. Row fetcher helper
+    def fetch_metric(label):
+        if df_raw is None:
+            return None
+        df_str = df_raw.fillna("").astype(str)
+        for idx, row in df_str.iterrows():
+            first_col = row[0].strip().lower()
+            if label.lower() in first_col:
+                values = [val.strip() for val in row[1:] if val.strip() != ""]
+                if values:
+                    try:
+                        return float(values[-1].replace(",", ""))
+                    except ValueError:
+                        return values[-1]
+        return None
+
+    # 3. Pull metrics dynamically from sheet rows
+    cmp       = fetch_metric("Current Price") or data.get("cmp")
+    roe       = fetch_metric("Return on Equity") or data.get("roe")
+    cfo_val   = fetch_metric("Cash from Operating Activity") or data.get("cfo")
+    de        = fetch_metric("Debt/Equity") or data.get("de")
+    pe        = fetch_metric("Price to Earning") or data.get("pe")
+    company   = data.get("company_name") or fetch_metric("COMPANY NAME") or "This company"
+
+    # Fallbacks for calculated/trend metrics
+    cfo_pat   = data.get("cfo_pat")
+    pe_5avg   = data.get("pe_5yr_avg")
+    sg10      = data.get("sales_growth_10y")
+    pg10      = data.get("pat_growth_10y")
+    pg3       = data.get("pat_growth_3y")
+    dcf       = data.get("dcf_value")
+    graham    = data.get("graham_value")
+    dhandho   = data.get("dhandho_value")
+    capex     = data.get("capex_latest")
+
+    def fmt(v, d=1, sfx=""):
+        return f"{v:,.{d}f}{sfx}" if v is not None else "N/A"
+
+    strengths = []
+    weaknesses = []
+    red_flags = []
+
+    # Simple narrative logic
+    if roe and isinstance(roe, (int, float)) and roe >= 15:
+        strengths.append(f"Strong business quality with high Return on Equity ({fmt(roe, 1, '%')}).")
+    elif roe and isinstance(roe, (int, float)):
+        weaknesses.append(f"ROE of {fmt(roe, 1, '%')} is below the 15% benchmark.")
+
+    if de and isinstance(de, (int, float)) and de <= 0.5:
+        strengths.append(f"Conservative capital structure with low Debt/Equity ({fmt(de, 2, 'x')}).")
+    elif de and isinstance(de, (int, float)) and de > 1.0:
+        red_flags.append(f"High financial leverage with Debt/Equity of {fmt(de, 2, 'x')}.")
+
+    return {
+        "strengths": strengths or ["Insufficient data to identify quantitative strengths."],
+        "weaknesses": weaknesses or ["No major quantitative weaknesses identified based on available data."],
+        "red_flags": red_flags or ["No major red flags identified from the quantitative data."],
+        "verdict": f"Evaluation completed for {company}."
+    }
         narrative = build_narrative(data, scorecard)
 
         # ── Header ────────────────────────────────────────────────────────────

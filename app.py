@@ -4,12 +4,16 @@ import re
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. MANDATORY: PAGE CONFIG (FIRST LINE)
+# 1. MANDATORY: PAGE CONFIG (MUST BE FIRST)
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Quant Equity Terminal", layout="wide", page_icon="📈")
+st.set_page_config(
+    page_title="Institutional Equity Terminal", 
+    layout="wide", 
+    page_icon="💎"
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. INSTITUTIONAL PRECISION HELPERS (PRESERVED)
+# 2. BASELINE PRECISION HELPERS (PRESERVED)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_num(val, default=0.0):
@@ -45,7 +49,7 @@ def to_num(val):
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. EXTRACTION ENGINE (PRESERVED & ENHANCED)
+# 3. EXTRACTION ENGINE (PRESERVED & WRAPPED)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_row_series(df, label_query):
@@ -68,26 +72,24 @@ def parse_file(file):
         xl = pd.ExcelFile(file, engine="openpyxl")
         ds_name = next((s for s in xl.sheet_names if "data sheet" in s.lower()), None)
         if not ds_name:
-            st.error("Data Sheet tab missing.")
+            st.error("Critical Failure: 'Data Sheet' tab not found.")
             return None
         df = pd.read_excel(xl, sheet_name=ds_name, header=None, dtype=str)
         
         data = {"company_name": str(df.iloc[0, 1]).strip()}
         
-        # Series Extraction
+        # Core Extraction
         data["sales_series"] = get_row_series(df, r"sales|revenue")
         data["pat_series"]   = get_row_series(df, r"net profit|profit after tax")
         data["cfo_series"]   = get_row_series(df, r"cash from operating|cfo")
         ebit_series          = get_row_series(df, r"operating profit|ebit")
         
-        # Latest Metrics
         sales = data["sales_series"][-1] if data["sales_series"] else 0
         pat   = data["pat_series"][-1] if data["pat_series"] else 0
         ebit  = ebit_series[-1] if ebit_series else 0
         cfo   = data["cfo_series"][-1] if data["cfo_series"] else 0
         pbt   = get_latest(df, r"profit before tax|pbt")
         
-        # Balance Sheet
         share_cap  = get_latest(df, r"equity share capital|share capital")
         reserves   = get_latest(df, r"reserves")
         borrowings = get_latest(df, r"borrowings|total debt") or 0.0
@@ -124,129 +126,161 @@ def parse_file(file):
         
         data["pe"] = div_safe(data["market_cap"], pat)
         data["cfo_pat"] = div_safe(cfo, pat)
-        
-        # Calculate Intrinsic "Fair Value" based on 5yr Median PE
-        # Fair Price = (PAT * Median PE) / (MCap / CMP)
-        shares_outstanding = div_safe(data["market_cap"], data["cmp"])
-        if shares_outstanding > 0:
-            data["fair_value"] = div_safe(pat * data["pe_5yr_avg"], shares_outstanding)
-        else:
-            data["fair_value"] = 0
 
         return data
     except Exception as e:
-        st.error(f"Critical error in engine: {e}")
+        st.error(f"Excel Parsing Error: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. ANALYTICAL UI
+# 4. INVESTOR INTERFACE
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🛡️ Risk Controls")
+    st.title("🔐 Analyst Controls")
     ticker = st.text_input("Ticker Symbol", "STOCK").upper()
-    gov_ok = st.checkbox("Governance Verified (No Pledging)", value=True)
+    gov_ok = st.checkbox("Governance Verified", value=True, help="Tick if audit is clean and pledging is 0%.")
     beta_val = st.number_input("Stock Beta", value=1.0, step=0.1)
     st.divider()
-    up = st.file_uploader("Upload Screener Excel", type="xlsx")
+    up = st.file_uploader("Upload Screener.in Excel", type="xlsx")
 
-if up:
+if not up:
+    st.title("🏛️ Strategic Equity Evaluator")
+    st.info("Please upload a Screener.in Excel export to begin high-conviction analysis.")
+else:
     data = parse_file(up)
     if data:
-        # --- PRE-CALCULATE SCORE ---
+        # --- TOP LEVEL IDENTIFICATION ---
+        st.header(f"💎 {data['company_name']} | Strategic Evaluation")
+        
+        # ── 1. INVESTOR PROFILE MATCH ENGINE ──
+        st.subheader("🎯 Investor Mandate Suitability")
+        
+        m_col1, m_col2 = st.columns(2)
+        
+        with m_col1:
+            st.markdown("### 🟢 BUY IF YOUR MANDATE IS:")
+            if data['roic'] > 18 and data['de'] < 0.5:
+                st.success(f"**Long-Term Quality Compounder:** You seek an ROIC of {fmt(data['roic'],1)}% with low financial risk (D/E: {fmt(data['de'])}).")
+            if data['fcf_conv'] > 80:
+                st.success(f"**Cash Flow Purity:** You require reported profits to be backed by actual bank balance ({fmt(data['fcf_conv'],1)}% FCF Conversion).")
+            if data['compounding_rate'] > 15:
+                st.success(f"**Growth Reinvestment:** You back companies that aggressively reinvest ({fmt(data['reinv_rate'],0)}%) to fuel future value.")
+            if data['pe'] < data['pe_5yr_avg']:
+                st.success(f"**Value with Catalyst:** You want to buy quality at a discount to historical norms (Current {fmt(data['pe'],1)}x vs 5Yr Avg {fmt(data['pe_5yr_avg'],1)}x).")
+
+        with m_col2:
+            st.markdown("### 🔴 AVOID / SELL IF YOUR MANDATE IS:")
+            if data['pe'] > (data['pe_5yr_avg'] * 1.25):
+                st.error(f"**Margin of Safety Priority:** Current P/E ({fmt(data['pe'],1)}x) offers zero protection against multiple contraction.")
+            if data['reinv_rate'] > 70:
+                st.error(f"**High Dividend Yield:** This company prioritizes internal growth ({fmt(data['reinv_rate'],0)}% reinvested) over dividend payouts.")
+            if beta_val > 1.3:
+                st.error(f"**Low Volatility Mandate:** The stock beta of {beta_val} suggests sharp price swings that exceed your risk appetite.")
+            if data['owner_earnings'] < (data['pat_series'][-1] * 0.8):
+                st.error(f"**Zero Accounting Risk:** Owner Earnings lag reported profits significantly. High maintenance capex is eating the 'paper profit'.")
+
+        st.divider()
+
+        # ── 2. PLAIN-ENGLISH METRIC WORKSPACE ──
+        st.subheader("📊 Fundamental Health & Intuitive Translations")
+        
+        def metric_card(title, value, translation, status="info"):
+            container = st.container(border=True)
+            if status == "success": color = "green"
+            elif status == "warning": color = "orange"
+            elif status == "error": color = "red"
+            else: color = "blue"
+            
+            container.markdown(f"**{title}**")
+            container.subheader(value)
+            container.caption(f"💡 {translation}")
+
+        # Metrics Grid
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            metric_card("ROIC", fmt(data['roic'], 1, "%"), 
+                        "The actual return generated on every ₹100 of capital deployed.",
+                        "success" if data['roic'] > 15 else "warning")
+            metric_card("Net Margin", fmt(data['net_margin'], 1, "%"),
+                        "Profit kept after all expenses. Pricing power indicator.",
+                        "success" if data['net_margin'] > 12 else "info")
+            
+        with c2:
+            metric_card("CFO/PAT", fmt(data['cfo_pat'], 2),
+                        "Cash Reality Check. > 1.0 means cash is coming in faster than accounting records it.",
+                        "success" if data['cfo_pat'] >= 0.8 else "error")
+            metric_card("Asset Turnover", fmt(data['asset_turnover'], 2) + "x",
+                        "Efficiency: How many ₹ of sales are generated by ₹1 of assets.",
+                        "info")
+
+        with c3:
+            metric_card("Equity Multiplier", fmt(data['equity_multiplier'], 2) + "x",
+                        "Leverage Dosage. > 2.2x indicates heavy reliance on debt to boost returns.",
+                        "warning" if data['equity_multiplier'] > 2.2 else "success")
+            metric_card("Owner Earnings", "₹" + fmt(data['owner_earnings'], 0) + " Cr",
+                        "Spendable cash left for shareholders after essential business upkeep.",
+                        "info")
+
+        with c4:
+            metric_card("Reinv. Rate", fmt(data['reinv_rate'], 1, "%"),
+                        "Growth Fuel: % of cash plowed back into the business for expansion.",
+                        "success" if data['reinv_rate'] > 40 else "info")
+            metric_card("D/E Ratio", fmt(data['de'], 2),
+                        "Solvency: ₹ of debt for every ₹1 of shareholder equity.",
+                        "success" if data['de'] < 0.5 else "error")
+
+        # ── 3. ENHANCED DUPONT DECOMPOSITION ──
+        st.divider()
+        st.subheader("🔬 ROE Engineering (DuPont Analysis)")
+        
+        # Calculate relative weights for the plain-english breakdown
+        # Logarithmic breakdown or simple relative magnitude for "Drivers"
+        total_driver = data['net_margin'] + (data['asset_turnover']*10) + (data['equity_multiplier']*5)
+        margin_contrib = (data['net_margin'] / total_driver) * 100
+        efficiency_contrib = ((data['asset_turnover']*10) / total_driver) * 100
+        leverage_contrib = ((data['equity_multiplier']*5) / total_driver) * 100
+
+        st.markdown(f"### Current ROE: **{fmt(data['roe'], 1, '%')}**")
+        
+        if data['equity_multiplier'] > 2.2:
+            st.error(f"⚠️ **RED FLAG:** ROE of {fmt(data['roe'], 1, '%')} is artificially inflated by high leverage ({fmt(data['equity_multiplier'], 2)}x). This is not operational strength; it is balance sheet risk.")
+        else:
+            st.success(f"✅ **QUALITY SIGN:** ROE is largely driven by margins and efficiency, not toxic levels of debt.")
+
+        dup1, dup2, dup3 = st.columns(3)
+        dup1.metric("1. Profit Margin", fmt(data['net_margin'], 1, "%"), help="Operational Prowess")
+        dup2.metric("2. Asset Efficiency", fmt(data['asset_turnover'], 2) + "x", help="Asset Utilization")
+        dup3.metric("3. Leverage Factor", fmt(data['equity_multiplier'], 2) + "x", help="Financial Gearing")
+        
+        st.info(f"**Plain-English Breakdown:** Your {fmt(data['roe'],1)}% ROE is sourced approximately **{margin_contrib:.0f}% from Profit Margins**, **{efficiency_contrib:.0f}% from Asset Utilization**, and **{leverage_contrib:.0f}% from Financial Debt.**")
+
+        # ── 4. VISUALIZATION ──
+        st.divider()
+        with st.expander("📈 View Revenue vs. Profit Trajectory"):
+            if data["sales_series"]:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(y=data["sales_series"], name="Top-Line (Sales)", line=dict(color="#2ECC71", width=4)))
+                fig.add_trace(go.Scatter(y=data["pat_series"], name="Bottom-Line (Profit)", line=dict(color="#3498DB", width=4)))
+                fig.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=20, b=20))
+                st.plotly_chart(fig, use_container_width=True)
+
+        # ── 5. FINAL DECISION SCORECARD ──
         s1 = data.get("roe", 0) >= 15
         s2 = data.get("cfo_pat", 0) >= 0.8
         s3 = data.get("pe", 100) <= (data.get("pe_5yr_avg", 20) * 1.1)
         s4 = gov_ok
         score = sum([s1, s2, s3, s4])
 
-        # ── UPGRADE 1: CONDITIONAL INVESTMENT ACTION ENGINE ──
-        st.header(f"🏢 {data['company_name']} Analysis")
-        
-        # Logical Action Matrix
-        if score == 4 and data['roic'] > 18 and data['pe'] <= data['pe_5yr_avg']:
-            st.success("🎯 **ACTION: STRONG BUY / ACCUMULATE** — Exceptional quality trading at or below historical mean valuation.")
-        elif score >= 3 and data['pe'] > data['pe_5yr_avg']:
-            st.warning("⏳ **ACTION: QUALITY WATCHLIST (WAIT FOR DIP)** — High quality business structure but valuation is currently overheated.")
-        elif data['roic'] < 10 or data['cfo_pat'] < 0.60 or data['de'] > 1.0:
-            st.error("🚫 **ACTION: VALUE TRAP / HIGH RISK (AVOID)** — Weak capital efficiency, high leverage, or poor cash conversion detected.")
-        elif (data['net_margin'] < 5) and (data['de'] > 1.0) and (data['pe'] > 30):
-            st.error("💀 **ACTION: SHORT / RED FLAG CANDIDATE** — Low margins, high debt, and aggressive valuation.")
-        else:
-            st.info("⚖️ **ACTION: NEUTRAL / HOLD** — Business is performing within standard parameters; no major entry/exit triggers.")
-
-        # Metric Banner
-        m1, m2, m3, m4, m5, m6 = st.columns(6)
-        m1.metric("Current Price", fmt(data['cmp']))
-        m2.metric("Fair Value (5yr PE)", fmt(data['fair_value']))
-        m3.metric("ROIC %", fmt(data['roic'], 1, "%"))
-        m4.metric("P/E Ratio", fmt(data['pe'], 1))
-        m5.metric("D/E Ratio", fmt(data['de'], 2))
-        m6.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
-
         st.divider()
-
-        # ── UPGRADE 2: DYNAMIC SCENARIO EVALUATOR (BULL VS BEAR) ──
-        col_bull, col_bear = st.columns(2)
-
-        with col_bull:
-            st.markdown("### 🟢 WHEN TO BUY (BULL CASE)")
-            st.info(f"""
-            **Consider an entry ONLY IF these conditions hold:**
-            1. **Valuation Reversion:** The stock price drops below **₹{fmt(data['fair_value'], 0)}** (based on 5-year median PE).
-            2. **Capital Efficiency Floor:** ROIC stays above **{fmt(data['roic']*0.9, 1)}%** (90% of current performance).
-            3. **Management Reinvestment:** Company continues reinvesting at least **{fmt(data['reinv_rate'], 0)}%** of NOPAT back into the business at high rates.
-            4. **Cash Reality:** CFO/PAT remains above **0.80**, ensuring accounting profits aren't 'paper-only'.
-            """)
-
-        with col_bear:
-            st.markdown("### 🔴 WHEN TO AVOID / SELL (BEAR CASE)")
-            st.error(f"""
-            **Reject or Exit the position IF:**
-            1. **Valuation Bubble:** P/E climbs significantly above **{fmt(data['pe'], 1)}x** without a corresponding jump in ROE.
-            2. **Leverage Trap:** Debt-to-Equity rises above **0.50** or Equity Multiplier exceeds **2.5x** (signaling ROE is faked via debt).
-            3. **Cash Deterioration:** FCF Conversion drops below **60%** (signaling customer payment delays or high inventory buildup).
-            4. **Margin Erosion:** Net Profit Margin falls below **{fmt(data['net_margin']*0.8, 1)}%**, signaling loss of pricing power.
-            """)
-
-        # ── UPGRADE 3: ENHANCED DUPONT & CASH INTERPRETATION ──
-        st.subheader("🕵️ Deep-Dive Integrity Checks")
-        tab1, tab2 = st.tabs(["DuPont Decomposition (ROE Quality)", "Cash Realism (Earnings Purity)"])
-
-        with tab1:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                st.write(f"**Current ROE: {fmt(data['roe'], 1, '%')}**")
-                st.write(f"- Margin: {fmt(data['net_margin'], 1, '%')}")
-                st.write(f"- Asset Turn: {fmt(data['asset_turnover'], 2)}x")
-                st.write(f"- Leverage: {fmt(data['equity_multiplier'], 2)}x")
-            with c2:
-                # Rule-based interpretation
-                em = data['equity_multiplier']
-                if em > 2.2:
-                    st.warning(f"**Interpretation:** This ROE is heavily fueled by **Leverage ({fmt(em, 2)}x)**. This is fragile. A 10% drop in margins could lead to a 25%+ drop in ROE.")
-                elif data['net_margin'] > 15:
-                    st.success("**Interpretation:** ROE is high-quality, driven primarily by **Product Pricing Power** (Net Margins).")
-                else:
-                    st.info("**Interpretation:** ROE is driven by **Operational Efficiency** (Asset Turnover).")
-
-        with tab2:
-            c1, c2 = st.columns([1, 2])
-            with c1:
-                st.write(f"**PAT:** ₹{fmt(data['pat_series'][-1], 0)} Cr")
-                st.write(f"**Owner Earnings:** ₹{fmt(data['owner_earnings'], 0)} Cr")
-                st.write(f"**FCF Conversion:** {fmt(data['fcf_conv'], 1, '%')}")
-            with c2:
-                if data['owner_earnings'] > (data['pat_series'][-1] * 0.95):
-                    st.success("**Interpretation:** Accounting earnings are **100% REAL**. Owner earnings match reported PAT, confirming no aggressive capitalization of expenses.")
-                else:
-                    st.error("**Interpretation:** Red Flag. Reported PAT is higher than Owner Earnings. The company is likely under-depreciating or over-capitalizing costs.")
-
-        # Historical Charts (Preserved)
-        if data.get("sales_series"):
-            with st.expander("📈 Revenue & Profit Trends"):
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue", line=dict(color="#00CC96", width=3)))
-                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit", line=dict(color="#636EFA", width=3)))
-                fig.update_layout(template="plotly_white", height=300, margin=dict(l=10, r=10, t=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+        col_res1, col_res2 = st.columns([1, 3])
+        with col_res1:
+            st.header(f"Score: {score}/4")
+        with col_res2:
+            if score == 4:
+                st.balloons()
+                st.success("**INSTITUTIONAL GRADE:** This stock clears every hurdle for quality, cash, and valuation. High conviction candidate.")
+            elif score == 3:
+                st.warning("**WATCHLIST GRADE:** High quality business, but either the price is too high or there is a minor governance/cash flow lag.")
+            else:
+                st.error("**SPECULATIVE / REJECT:** Multiple fundamental failures. Does not meet the 'Safety First' criteria for long-term compounding.")

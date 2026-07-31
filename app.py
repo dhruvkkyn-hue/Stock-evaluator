@@ -1,195 +1,229 @@
-import openpyxl
-from openpyxl.styles import Font, Fill, Alignment, PatternFill, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.views import SheetView
+import streamlit as st
+import pandas as pd
+import numpy as np
+import re
+import plotly.graph_objects as go
 
-def create_screener_template():
-    wb = openpyxl.Workbook()
-    wb.calculation.calcMode = 'auto'
-    
-    # Styles
-    header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
-    header_font = Font(color="FFFFFF", bold=True)
-    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    
-    def apply_header_style(ws, row_num, col_range):
-        for col in col_range:
-            cell = ws.cell(row=row_num, column=col)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center")
+# ------------------------------------------------------------------------------
+# 1. ANALYTICAL CONFIGURATION & MAPPING
+# ------------------------------------------------------------------------------
+# Fuzzy labels to match Screener.in row names
+MAPPING = {
+    "sales": [r"sales", r"revenue", r"turnover"],
+    "exp_raw_mat": [r"raw material"],
+    "exp_employee": [r"employee cost"],
+    "operating_profit": [r"operating profit", r"ebitda"],
+    "depreciation": [r"depreciation"],
+    "interest": [r"interest"],
+    "pbt": [r"profit before tax", r"pbt"],
+    "tax": [r"tax"],
+    "pat": [r"net profit", r"pat", r"profit after tax"],
+    "equity_cap": [r"share capital"],
+    "reserves": [r"reserves"],
+    "borrowings": [r"borrowings", r"total debt"],
+    "other_liab": [r"other liabilities"],
+    "fixed_assets": [r"net block", r"fixed assets"],
+    "investments": [r"investments"],
+    "receivables": [r"receivables"],
+    "cash": [r"cash", r"bank balance"],
+    "total_assets": [r"total assets"],
+    "cfo": [r"cash from operating activity", r"cfo"],
+    "capex": [r"fixed assets purchased", r"capital expenditure"],
+}
 
-    def setup_sheet(name):
-        ws = wb.create_sheet(name)
-        ws.sheet_view.showGridLines = True
-        return ws
+PLAIN_ENGLISH = {
+    "roe": "How efficiently management reinvests ₹100 of shareholder money into real profit.",
+    "roic": "The actual return earned on all capital (debt + equity) put into the business.",
+    "cfo_pat": "The 'Truth Test' checking if reported paper profits are turning into actual bank cash.",
+    "de": "How heavily the company relies on borrowed money vs its own savings.",
+    "sloan": "An automated Lie Detector scanning for suspicious accounting accruals.",
+    "graham": "The 'Fair Price' Benjamin Graham would pay based on current earnings and book value.",
+}
 
-    # 1. DATA SHEET (The Anchor)
-    ds = wb.active
-    ds.title = "Data Sheet"
-    ds.sheet_view.showGridLines = True
-    
-    # Static Headers for Screener mapping
-    headers = ["Metric", "Mar-15", "Mar-16", "Mar-17", "Mar-18", "Mar-19", "Mar-20", "Mar-21", "Mar-22", "Mar-23", "Mar-24"]
-    for i, h in enumerate(headers, 1):
-        ds.cell(1, i, h)
-    apply_header_style(ds, 1, range(1, 12))
+# ------------------------------------------------------------------------------
+# 2. DATA SANITIZATION & EXTRACTION ENGINE
+# ------------------------------------------------------------------------------
+def clean_numeric(val):
+    """Clean symbols, commas, and formatting from Screener cells."""
+    if pd.isna(val) or val == "" or val == "-":
+        return 0.0
+    if isinstance(val, (int, float)):
+        return float(val)
+    # Remove everything except numbers, dots, and minus signs
+    cleaned = re.sub(r'[^\d\.\-]', '', str(val))
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
 
-    # Define standard Screener row order (Simplified for Template structure)
-    ds_rows = [
-        "Current Price", "Market Capitalization", "Face Value", "Shares",
-        "Sales", "Raw Material Cost", "Power and Fuel", "Other Expenses", "Employee Cost", 
-        "Operating Profit", "Other Income", "Depreciation", "Interest", "Profit before tax", "Tax", "Net Profit",
-        "Share Capital", "Reserves", "Borrowings", "Other Liabilities", "Total Liabilities",
-        "Net Block", "Capital Work in Progress", "Investments", "Receivables", "Cash and Bank", "Total Assets",
-        "Cash from Operating Activity", "Cash from Investing Activity", "Cash from Financing Activity", "Net Cash Flow"
-    ]
-    for i, label in enumerate(ds_rows, 2):
-        ds.cell(i, 1, label)
+def extract_row(df, keywords):
+    """Fuzzy match row labels and return cleaned numeric series."""
+    for pattern in keywords:
+        mask = df.iloc[:, 0].str.contains(pattern, case=False, na=False, regex=True)
+        if mask.any():
+            row_data = df[mask].iloc[0, 1:]
+            return np.array([clean_numeric(x) for x in row_data])
+    return None
 
-    # 2. SUMMARY SHEET
-    summary = setup_sheet("Summary")
-    summary.cell(1, 1, "EXECUTIVE DASHBOARD").font = Font(bold=True, size=14)
-    
-    summary.cell(3, 1, "Company Name")
-    summary.cell(3, 2, "='Data Sheet'!B1") # Screener usually puts Name in Header or B1
-    
-    metrics = [
-        ("CMP", "='Data Sheet'!B2"),
-        ("Market Cap (Cr)", "='Data Sheet'!B3"),
-        ("5-Yr Avg ROE (%)", "=AVERAGE('Data Sheet'!B17:F17)"), # Dummy range logic
-        ("Debt to Equity", "='Data Sheet'!B19/('Data Sheet'!B17+'Data Sheet'!B18)"),
-        ("Piotroski Score", "='Piotroski & Financial Health'!C15")
-    ]
-    for i, (label, formula) in enumerate(metrics, 5):
-        summary.cell(i, 1, label)
-        summary.cell(i, 2, formula)
-    apply_header_style(summary, 4, range(1, 3))
+# ------------------------------------------------------------------------------
+# 3. FINANCIAL CALCULATION CORE
+# ------------------------------------------------------------------------------
+class ValueEngine:
+    def __init__(self, df):
+        self.df = df
+        self.data = {}
+        self.is_bank = False
+        self.run_extraction()
 
-    # 3. PIOTROSKI & FINANCIAL HEALTH
-    ph = setup_sheet("Piotroski & Financial Health")
-    ph_headers = ["Piotroski 9-Point Check", "Latest Year", "Previous Year"]
-    for i, h in enumerate(ph_headers, 1): ph.cell(1, i, h)
-    apply_header_style(ph, 1, range(1, 4))
-    
-    p_checks = [
-        "Net Profit > 0", "CFO > 0", "ROA Increasing", "CFO > Net Profit",
-        "Debt/Equity Decreasing", "Current Ratio Increasing", "No New Shares",
-        "Gross Margin Increasing", "Asset Turnover Increasing"
-    ]
-    for i, check in enumerate(p_checks, 2):
-        ph.cell(i, 1, check)
-        # Dynamic IF formulas comparing Data Sheet columns B and C
-        ph.cell(i, 2, f"=IF('Data Sheet'!B16>0, 1, 0)") 
+    def run_extraction(self):
+        # Determine if it's a Bank/NBFC
+        if self.df.iloc[:, 0].str.contains("Interest Expended|Advances", case=False).any():
+            self.is_bank = True
+
+        for key, keywords in MAPPING.items():
+            res = extract_row(self.df, keywords)
+            self.data[key] = res if res is not None else np.zeros(10)
+
+    def calculate_metrics(self):
+        d = self.data
+        # Handle zero division safety
+        def safe_div(a, b): return np.divide(a, b, out=np.zeros_like(a), where=b!=0)
+
+        results = {}
+        # 1. Basic Ratios
+        equity = d['equity_cap'] + d['reserves']
+        results['roe'] = safe_div(d['pat'], equity) * 100
+        results['de'] = safe_div(d['borrowings'], equity)
+        results['cfo_pat'] = safe_div(d['cfo'], d['pat'])
         
-    ph.cell(15, 1, "Total Piotroski Score")
-    ph.cell(15, 2, "=SUM(B2:B10)")
-
-    # 4. KEY RATIOS & CASH FLOW
-    kr = setup_sheet("Key Ratios & Cash Flow Metrics")
-    kr_metrics = [
-        "Cash Conversion Ratio (CFO/PAT)", "FCF Margin %", "Interest Coverage Ratio",
-        "Debtor Days", "Inventory Days", "Payable Days", "Cash Conversion Cycle"
-    ]
-    for i, m in enumerate(kr_metrics, 2):
-        kr.cell(i, 1, m)
-        # Formulas referencing Data Sheet
-        if i == 2: kr.cell(i, 2, "='Data Sheet'!B28/'Data Sheet'!B16")
-    apply_header_style(kr, 1, range(1, 3))
-
-    # 5. DUPONT ANALYSIS (5-Stage)
-    dp = setup_sheet("DuPont Analysis")
-    dp_steps = ["Tax Burden", "Interest Burden", "EBIT Margin", "Asset Turnover", "Equity Multiplier", "Calculated ROE"]
-    for i, step in enumerate(dp_steps, 2): dp.cell(i, 1, step)
-    
-    # DuPont Formulas (Example for Latest Year)
-    dp.cell(2, 2, "='Data Sheet'!B16/'Data Sheet'!B14") # PAT/PBT
-    dp.cell(3, 2, "='Data Sheet'!B14/('Data Sheet'!B10+'Data Sheet'!B11)") # PBT/EBIT
-    dp.cell(4, 2, "=('Data Sheet'!B10+'Data Sheet'!B11)/'Data Sheet'!B5") # EBIT/Sales
-    dp.cell(5, 2, "='Data Sheet'!B5/'Data Sheet'!B27") # Sales/Total Assets
-    dp.cell(6, 2, "='Data Sheet'!B27/('Data Sheet'!B17+'Data Sheet'!B18)") # Assets/Equity
-    dp.cell(7, 2, "=PRODUCT(B2:B6)")
-    apply_header_style(dp, 1, range(1, 3))
-
-    # 6. DCF MODEL
-    dcf = setup_sheet("DCF")
-    dcf_inputs = ["Risk Free Rate", "Equity Risk Premium", "Beta", "Growth Rate (5Yr)", "Terminal Growth"]
-    for i, inp in enumerate(dcf_inputs, 2):
-        dcf.cell(i, 1, inp)
-        dcf.cell(i, 2, 0.07 if "Rate" in inp else 1.0)
-    
-    dcf.cell(8, 1, "PV of 10-Year Cash Flows")
-    dcf.cell(9, 1, "Terminal Value")
-    dcf.cell(10, 1, "Enterprise Value")
-    dcf.cell(11, 1, "Fair Value per Share")
-    apply_header_style(dcf, 1, range(1, 3))
-
-    # 7. BEN GRAHAM & DHANDHO
-    bg = setup_sheet("Ben Graham Formula")
-    bg.cell(2, 1, "EPS (TTM)")
-    bg.cell(2, 2, "='Data Sheet'!B16/'Data Sheet'!B5") # Placeholder formula
-    bg.cell(3, 1, "Graham Number")
-    bg.cell(3, 2, "=SQRT(22.5*B2*('Data Sheet'!B17+'Data Sheet'!B18)/'Data Sheet'!B5)")
-    apply_header_style(bg, 1, range(1, 3))
-
-    # 8. INSTITUTIONAL MULTIPLES
-    im = setup_sheet("Institutional Multiples")
-    im_headers = ["Year", "P/E", "P/S", "EV/EBITDA", "FCF Yield %"]
-    for i, h in enumerate(im_headers, 1): im.cell(1, i, h)
-    apply_header_style(im, 1, range(1, 6))
-
-    # 9. TREND ANALYSIS
-    tr = setup_sheet("Directional Trend Analysis")
-    tr_headers = ["Metric", "Avg (First 5Y)", "Avg (Last 5Y)", "Trend"]
-    for i, h in enumerate(tr_headers, 1): tr.cell(1, i, h)
-    tr.cell(2, 1, "Revenue Growth")
-    tr.cell(2, 2, "=AVERAGE('Data Sheet'!G5:K5)")
-    tr.cell(2, 3, "=AVERAGE('Data Sheet'!B5:F5)")
-    tr.cell(2, 4, "=IF(C2>B2, \"Improving\", \"Declining\")")
-    apply_header_style(tr, 1, range(1, 5))
-
-    # 10. COMMON SIZE ANALYSIS
-    cs = setup_sheet("Common Size Analysis")
-    cs.cell(1, 1, "P&L Common Size (% of Sales)")
-    cs.cell(2, 1, "Raw Materials")
-    cs.cell(2, 2, "='Data Sheet'!B6/'Data Sheet'!B5")
-    apply_header_style(cs, 1, range(1, 3))
-
-    # 11. CHECKLIST
-    ch = setup_sheet("Checklist")
-    checks = ["Competent Management?", "Pricing Power?", "High Barriers to Entry?", "Clean Accounting?"]
-    for i, check in enumerate(checks, 2):
-        ch.cell(i, 1, check)
-        ch.cell(i, 2, "YES/NO")
-    apply_header_style(ch, 1, range(1, 3))
-
-    # Placeholder sheets for remaining requirements
-    setup_sheet("Historical Context Comparison")
-    setup_sheet("Expected Returns")
-
-    # Final Formatting for all sheets
-    for sheet in wb.worksheets:
-        # Auto-fit columns
-        for col in sheet.columns:
-            max_length = 0
-            column = col[0].column_letter
-            for cell in col:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except: pass
-            adjusted_width = (max_length + 2)
-            sheet.column_dimensions[column].width = adjusted_width
+        # 2. DuPont 5-Stage
+        # Tax Burden * Interest Burden * EBIT Margin * Asset Turnover * Equity Multiplier
+        ebit = d['pbt'] + d['interest']
+        results['tax_burden'] = safe_div(d['pat'], d['pbt'])
+        results['int_burden'] = safe_div(d['pbt'], ebit)
+        results['ebit_margin'] = safe_div(ebit, d['sales'])
+        results['asset_turnover'] = safe_div(d['sales'], d['total_assets'])
+        results['equity_multiplier'] = safe_div(d['total_assets'], equity)
         
-        # Apply borders to used range
-        for row in sheet.iter_rows(min_row=1, max_row=sheet.max_row, min_col=1, max_col=sheet.max_column):
-            for cell in row:
-                cell.border = border
+        # 3. Forensic: Sloan Ratio
+        results['sloan'] = safe_div((d['pat'] - d['cfo']), d['total_assets'])
+        
+        # 4. Valuation: Graham Number
+        # SQRT(22.5 * EPS * BVPS) -> Approximation using MCap and Equity
+        eps_total = d['pat'] # Working with Cr directly
+        bv_total = equity
+        # In Screener Cr units: SQRT(22.5 * PAT_Cr * Equity_Cr) / Shares (skipped shares for simplicity)
+        results['graham_value_total'] = np.sqrt(np.maximum(0, 22.5 * d['pat'] * equity))
+        
+        return results
 
-    # Save
-    filename = "Screener_Custom_Template.xlsx"
-    wb.save(filename)
-    print(f"Successfully generated {filename}")
+# ------------------------------------------------------------------------------
+# 4. STREAMLIT UI
+# ------------------------------------------------------------------------------
+st.set_page_config(page_title="Principal Value Terminal", layout="wide")
 
-if __name__ == "__main__":
-    create_screener_template()
+st.title("🏦 Institutional Equity Research Terminal")
+st.subheader("Automated 10-Year Value Investing Framework")
+
+uploaded_file = st.file_uploader("Upload Screener.in Excel File", type="xlsx")
+
+if uploaded_file:
+    # Load raw Data Sheet
+    try:
+        raw_df = pd.read_excel(uploaded_file, sheet_name='Data Sheet', header=None)
+        # Drop empty rows and columns
+        raw_df = raw_df.dropna(how='all').dropna(axis=1, how='all')
+    except Exception as e:
+        st.error(f"Error reading 'Data Sheet'. Please ensure the tab exists. {e}")
+        st.stop()
+
+    engine = ValueEngine(raw_df)
+    metrics = engine.calculate_metrics()
+    
+    # --- EXECUTIVE DASHBOARD ---
+    col1, col2, col3, col4 = st.columns(4)
+    latest_roe = metrics['roe'][-1]
+    latest_cfo_pat = metrics['cfo_pat'][-1]
+    latest_de = metrics['de'][-1]
+    mcap = engine.data['market_cap'][0] # Usually in early columns
+
+    col1.metric("10-Year ROE (Avg)", f"{np.mean(metrics['roe']):.2f}%")
+    col2.metric("Cash Realism (CFO/PAT)", f"{latest_cfo_pat:.2f}x")
+    col3.metric("Solvency (D/E)", f"{latest_de:.2f}")
+    col4.metric("Forensic (Sloan Ratio)", f"{metrics['sloan'][-1]*100:.2f}%")
+
+    # --- DECISION ENGINE SCORE ---
+    st.divider()
+    
+    score = 0
+    if latest_roe >= 15: score += 25
+    if latest_cfo_pat >= 0.8: score += 20
+    if latest_de <= 0.5: score += 20
+    if metrics['sloan'][-1] < 0.1: score += 15
+    # Valuation Score (Simplified logic)
+    curr_mcap = engine.data['market_cap'].max()
+    fair_mcap = metrics['graham_value_total'][-1]
+    if curr_mcap < fair_mcap: score += 20
+
+    score_color = "green" if score >= 70 else "orange" if score >= 50 else "red"
+    st.markdown(f"## 🏆 BUFFETT/MUNGER SCORE: :{score_color}[{score} / 100]")
+    
+    if score >= 75: stance, color = "🟢 BUY / HIGH CONVICTION", "green"
+    elif score >= 50: stance, color = "🟡 WAIT / WATCHLIST", "orange"
+    else: stance, color = "🔴 AVOID / REJECTED", "red"
+    
+    st.subheader(f"ACTIONABLE STANCE: :{color}[{stance}]")
+
+    # --- PLAIN ENGLISH TRANSLATION SECTION ---
+    with st.expander("📝 Plain English Metric Guide", expanded=True):
+        for key, desc in PLAIN_ENGLISH.items():
+            st.markdown(f"**{key.upper()}:** {desc}")
+
+    # --- DEEP DIVE TABS ---
+    tab1, tab2, tab3 = st.tabs(["Forensics & DuPont", "Historical Trends", "Valuation Models"])
+
+    with tab1:
+        st.write("### 🧬 DuPont 5-Stage Breakdown")
+        dupont_df = pd.DataFrame({
+            "Tax Burden": metrics['tax_burden'],
+            "Interest Burden": metrics['int_burden'],
+            "EBIT Margin": metrics['ebit_margin'],
+            "Asset Turnover": metrics['asset_turnover'],
+            "Equity Multiplier": metrics['equity_multiplier']
+        }).tail(5)
+        st.table(dupont_df)
+        st.info(f"**Insight:** {PLAIN_ENGLISH['roe']}")
+
+    with tab2:
+        st.write("### 📈 10-Year Revenue vs Profit Growth")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=engine.data['sales'], name="Sales (Cr)"))
+        fig.add_trace(go.Scatter(y=engine.data['pat'], name="Net Profit (Cr)"))
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab3:
+        st.write("### 💎 Fair Value vs Market Cap")
+        val_df = pd.DataFrame({
+            "Metric": ["Current Market Cap", "Graham Fair Value", "Margin of Safety (%)"],
+            "Value": [
+                f"₹{curr_mcap:.2f} Cr", 
+                f"₹{fair_mcap:.2f} Cr", 
+                f"{((fair_mcap - curr_mcap)/fair_mcap)*100:.2f}%" if fair_mcap > 0 else "N/A"
+            ]
+        })
+        st.table(val_df)
+
+    # --- FINAL SUMMARY ---
+    st.divider()
+    c_str, c_risk = st.columns(2)
+    with c_str:
+        st.success("### 🟢 Core Strengths\n" + 
+                   f"- Management generates {latest_roe:.1f}% on every rupee invested.\n" +
+                   f"- Business converts {latest_cfo_pat*100:.1f}% of profit to real bank cash.")
+    with c_risk:
+        st.error("### 🔴 Key Risks\n" + 
+                 f"- Debt levels are {latest_de:.2f}x of equity.\n" +
+                 f"- Sloan Ratio of {metrics['sloan'][-1]*100:.1f}% indicates {'aggressive' if metrics['sloan'][-1] > 0.1 else 'safe'} accruals.")
+
+else:
+    st.info("👆 Please upload the 'Custom' Screener Excel file to begin analysis.")

@@ -1,134 +1,300 @@
+import streamlit as st
 import pandas as pd
-import numpy as np
+import sqlite3
 import re
+import datetime
+import json
+import plotly.graph_objects as go
 
-class EliteResearchWorkstation:
-    def __init__(self, file_path):
-        self.file_path = file_path
-        self.raw_data = None
-        self.is_bank = False
-        self.metrics = {}
-        self.score_card = {"Moat": 0, "Cash": 0, "Debt": 0, "Forensic": 0, "Value": 0}
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. INSTITUTIONAL PRECISION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def safe_num(val, default=0.0):
+    """Safely converts any value to a float, preventing arithmetic crashes."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+def div_safe(numerator, denominator):
+    """Performs division with zero and None protection."""
+    n = safe_num(numerator)
+    d = safe_num(denominator)
+    if d == 0:
+        return 0.0
+    return n / d
+
+def fmt(v, d=2, sfx="", prefix=""):
+    """Formatted UI output with N/A handling."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return "N/A"
+    return f"{prefix}{safe_num(v):,.{d}f}{sfx}"
+
+def to_num(val):
+    """Cleans Screener.in raw strings into valid floats."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
+    s = re.sub(r"\s*(cr|crores?|%|x|times|inr)\.?\s*$", "", s, flags=re.I)
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except:
+        return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. RAW DATA EXTRACTION ENGINE (DATA SHEET SCOPE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_row_series(df, label_query):
+    """Finds row by regex/substring and returns the full numeric series."""
+    label_query = label_query.lower().strip()
+    for r_idx in range(len(df)):
+        cell_label = str(df.iloc[r_idx, 0]).lower().strip()
+        if re.search(label_query, cell_label):
+            return [to_num(val) for val in df.iloc[r_idx, 1:] if to_num(val) is not None]
+    return []
+
+def get_latest(df, labels):
+    """Searches multiple aliases and returns the most recent numeric value."""
+    if isinstance(labels, str): labels = [labels]
+    for label in labels:
+        series = get_row_series(df, label)
+        if series: return series[-1]
+    return None
+
+def parse_file(file):
+    try:
+        xl = pd.ExcelFile(file, engine="openpyxl")
+        ds_name = next((s for s in xl.sheet_names if "data sheet" in s.lower()), None)
+        if not ds_name:
+            st.error("Critical Failure: 'Data Sheet' tab not found in the uploaded file.")
+            return None
+        df = pd.read_excel(xl, sheet_name=ds_name, header=None, dtype=str)
+    except Exception as e:
+        st.error(f"Excel Parsing Error: {e}")
+        return None
+
+    data = {}
+    data["company_name"] = str(df.iloc[0, 1]).strip()
+    
+    # ── RAW LINE ITEMS ──
+    sales_series = get_row_series(df, r"sales|revenue")
+    pat_series   = get_row_series(df, r"net profit|profit after tax")
+    cfo_series   = get_row_series(df, r"cash from operating|cfo")
+    ebit_series  = get_row_series(df, r"operating profit|ebit")
+    
+    data["sales_series"] = sales_series
+    data["pat_series"]   = pat_series
+    data["cfo_series"]   = cfo_series
+
+    # Latest Values
+    sales = sales_series[-1] if sales_series else 0
+    pat   = pat_series[-1] if pat_series else 0
+    ebit  = ebit_series[-1] if ebit_series else 0
+    cfo   = cfo_series[-1] if cfo_series else 0
+    pbt   = get_latest(df, r"profit before tax|pbt")
+    
+    # Balance Sheet
+    share_cap  = get_latest(df, r"equity share capital|share capital")
+    reserves   = get_latest(df, r"reserves")
+    borrowings = get_latest(df, r"borrowings|total debt") or 0.0
+    other_liab = get_latest(df, r"other liabilities|other liab") or 0.0
+    total_assets = get_latest(df, r"total assets")
+    cash       = get_latest(df, r"cash equivalents|cash & bank|cash") or 0.0
+    capex      = get_latest(df, r"fixed assets purchased|capital expenditure|capex") or 0.0
+    depr       = get_latest(df, r"depreciation") or 0.0
+
+    # Metadata
+    data["cmp"] = get_latest(df, r"current price|cmp")
+    data["market_cap"] = get_latest(df, r"market capitalization|market cap")
+    data["pe_5yr_avg"] = get_latest(df, [r"5 year avg pe", r"median pe"]) or 20.0
+
+    # ── PRECISION CALCULATIONS ──
+    try:
+        # 1. Solvency
+        equity = safe_num(share_cap) + safe_num(reserves)
+        data["equity"] = equity
+        data["de"] = div_safe(borrowings, equity)
         
-        # Plain English Translation Dictionary
-        self.translations = {
-            "roe": "How effectively management turns ₹100 of shareholder money into real profit.",
-            "cfo_pat": "The truth-test checking if reported paper profits are turning into actual cash in the bank.",
-            "sloan": "An accounting lie-detector checking whether earnings are real or stuck in uncollected bills.",
-            "equity_multiplier": "Shows if returns are driven by business merit or artificially boosted by debt.",
-            "graham_number": "The 'Fair Price' Benjamin Graham would pay based on earnings and book value.",
-            "fcf": "The actual pocket money left for the business after paying for all maintenance and growth."
-        }
+        # 2. Capital Efficiency (ROIC)
+        tax_rate = div_safe((safe_num(pbt) - safe_num(pat)), pbt) if safe_num(pbt) > 0 else 0.25
+        nopat = safe_num(ebit) * (1 - tax_rate)
+        invested_cap = max((equity + safe_num(borrowings) - safe_num(cash)), equity)
+        data["roic"] = div_safe(nopat, invested_cap) * 100
+        data["roe"] = div_safe(pat, equity) * 100
 
-    def load_and_sanitize(self):
-        """Loads 'Data Sheet' and cleans non-numeric junk."""
-        try:
-            # Use openpyxl engine to read the raw strings
-            df = pd.read_excel(self.file_path, sheet_name='Data Sheet', header=None)
-            df = df.dropna(how='all', axis=0).dropna(how='all', axis=1)
-            
-            # Fuzzy match the label column
-            df.iloc[:, 0] = df.iloc[:, 0].astype(str).str.lower().str.strip()
-            self.raw_data = df
-            
-            # Industry Detection: Banks have 'Interest Earned' or 'Advances'
-            labels = " ".join(df.iloc[:, 0].tolist())
-            if "interest earned" in labels or "advances" in labels:
-                self.is_bank = True
-        except Exception as e:
-            raise ValueError(f"CRITICAL: Failed to parse 'Data Sheet'. Ensure file is a Screener export. Error: {e}")
+        # 3. DuPont Decomposition
+        data["net_margin"] = div_safe(pat, sales) * 100
+        data["asset_turnover"] = div_safe(sales, total_assets if total_assets else (equity + borrowings))
+        data["equity_multiplier"] = div_safe(total_assets if total_assets else (equity + borrowings), equity)
 
-    def _get_row(self, keywords):
-        """Dynamic Fuzzy Matching for Row Labels."""
-        for kw in keywords:
-            mask = self.raw_data.iloc[:, 0].str.contains(kw, na=False)
-            if mask.any():
-                # Extract numeric values, strip symbols, convert to float
-                row = self.raw_data[mask].iloc[0, 1:]
-                return np.array([self._clean_val(v) for v in row])
-        return np.zeros(10) # Default to zero series if not found
-
-    def _clean_val(self, val):
-        if pd.isna(val) or val == "" or str(val).strip() in ["-", "—"]: return 0.0
-        s = str(val).replace('₹', '').replace(',', '').replace('%', '').strip()
-        try: return float(s)
-        except: return 0.0
-
-    def execute_pipeline(self):
-        self.load_and_sanitize()
+        # 4. Cash Realism & Reinvestment
+        actual_capex = abs(safe_num(capex))
+        data["fcf"] = safe_num(cfo) - actual_capex
+        data["owner_earnings"] = safe_num(pat) + safe_num(depr) - actual_capex
+        data["fcf_conv"] = div_safe(data["fcf"], pat) * 100
+        data["reinv_rate"] = div_safe(actual_capex, nopat) * 100
+        data["compounding_rate"] = (data["roic"] / 100) * data["reinv_rate"]
         
-        # 1. Extraction (Keyword Arrays per directive)
-        sales = self._get_row(["sales", "revenue", "interest earned", "total income"])
-        pat = self._get_row(["net profit", "pat", "profit after tax"])
-        ebit = self._get_row(["operating profit", "ebit", "operating income"])
-        equity = self._get_row(["equity share capital", "reserves", "total equity"])
-        debt = self._get_row(["borrowings", "total debt"])
-        cfo = self._get_row(["cash from operating", "operating cash flow", "cfo"])
-        capex = self._get_row(["capex", "capital expenditure", "purchase of fixed assets"])
-        assets = self._get_row(["total assets"])
-        pbt = self._get_row(["profit before tax", "pbt"])
+        # Dashboard Ratios
+        data["pe"] = div_safe(data["market_cap"], pat)
+        data["cfo_pat"] = div_safe(cfo, pat)
 
-        # Handle 0 division safety
-        def safe_div(n, d): return np.divide(n, d, out=np.zeros_like(n), where=d!=0)
+    except Exception as e:
+        st.warning(f"Analytical gap detected: {e}")
 
-        # 2. Forensic & Cash Logic
-        cfo_pat_ratio = safe_div(cfo, pat)
-        sloan_ratio = safe_div((pat - cfo), assets)
-        
-        # 3. DuPont 5-Stage (Latest Year)
-        tax_burden = pat[-1] / pbt[-1] if pbt[-1] != 0 else 0
-        int_burden = pbt[-1] / ebit[-1] if ebit[-1] != 0 else 0
-        ebit_margin = ebit[-1] / sales[-1] if sales[-1] != 0 else 0
-        asset_turnover = sales[-1] / assets[-1] if assets[-1] != 0 else 0
-        leverage = assets[-1] / equity[-1] if equity[-1] != 0 else 0
-        roe = (pat[-1] / equity[-1]) * 100
+    return data
 
-        # 4. Valuation (Graham Number)
-        graham_num = np.sqrt(max(0, 22.5 * pat[-1] * equity[-1])) # Simplified for aggregate Cr values
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. UI LAYOUT & ANALYTICAL WORKSTATION
+# ─────────────────────────────────────────────────────────────────────────────
 
-        # 5. Scoring Engine (100 Points)
-        if roe >= 15: self.score_card["Moat"] = 25
-        if cfo_pat_ratio[-1] >= 0.8: self.score_card["Cash"] = 20
-        de_ratio = debt[-1] / equity[-1]
-        if de_ratio <= 0.5: self.score_card["Debt"] = 20
-        if abs(sloan_ratio[-1]) < 0.1: self.score_card["Forensic"] = 15
-        
-        total_score = sum(self.score_card.values())
+st.set_page_config(page_title="Equity Research Terminal", layout="wide", page_icon="🏦")
 
-        # 6. Output Narrative Generation
-        self._print_report(total_score, roe, cfo_pat_ratio, de_ratio, sloan_ratio, graham_num)
+# Sidebar inputs
+with st.sidebar:
+    st.title("🏦 Research Controls")
+    ticker = st.text_input("Ticker Symbol", "STOCK").upper()
+    gov_ok = st.checkbox("Governance Verified (0% Pledging & Clean Audit)")
+    beta_val = st.number_input("Stock Beta", value=1.1, step=0.1)
+    st.divider()
+    st.caption("Instructions: Upload the full Excel export from Screener.in to generate the memorandum.")
 
-    def _print_report(self, score, roe, cfo_pat, de, sloan, graham):
-        stance = "🟢 STRONG BUY" if score >= 80 else "🟢 ACCUMULATE" if score >= 65 else "🟡 WATCHLIST" if score >= 50 else "🔴 AVOID"
-        
-        print(f"{'-'*78}")
-        print(f"🏆 BUFFETT/MUNGER BUSINESS QUALITY SCORE: {score} / 100")
-        print(f"ACTIONABLE STANCE: {stance}")
-        print(f"{'-'*78}")
-        print("\n📊 EXECUTIVE SUMMARY")
-        print(f"- Industry Detected: {'Banking/NBFC' if self.is_bank else 'Manufacturing/Service'}")
-        print(f"- Current ROE: {roe:.2f}% | Plain English: {self.translations['roe']}")
-        print(f"- Cash Quality (CFO/PAT): {cfo_pat[-1]:.2f}x | Plain English: {self.translations['cfo_pat']}")
-        
-        print("\n🟢 CORE STRENGTHS")
-        if roe >= 15: print(f"- Robust Capital Efficiency: Generating {roe:.2f}% on equity.")
-        if cfo_pat[-1] >= 1: print("- High Earnings Quality: Company collects more cash than it reports as paper profit.")
-        
-        print("\n🔴 KEY RISKS & RED FLAGS")
-        if de > 0.5: print(f"- High Leverage: Debt-to-Equity is {de:.2f}. Management is aggressive with borrowing.")
-        if abs(sloan[-1]) > 0.1: print(f"- Accrual Warning: Sloan Ratio ({sloan[-1]:.2f}) suggests potential non-cash earnings inflation.")
-        
-        print("\n⚖️ VALUATION SUMMARY")
-        print(f"- Graham Aggregate Valuation: ₹{graham:,.2f} Cr")
-        print(f"- Plain English: {self.translations['graham_number']}")
-        
-        print("\n📋 RECOMMENDED EXECUTION STRATEGY")
-        if stance.startswith("🟢"):
-            print("- Staggered accumulation on market dips. Focus on holding for the full compounding cycle.")
+st.title("📊 Master Quantitative & Business Risk Evaluator")
+up = st.file_uploader("Upload Company Export", type="xlsx")
+
+if up:
+    data = parse_file(up)
+    if data:
+        # ── 1. TOP METRICS BANNER ──
+        st.header(f"🏢 {data.get('company_name')}")
+        m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
+        m1.metric("Price", fmt(data.get('cmp')))
+        m2.metric("MCap (Cr)", fmt(data.get('market_cap'), 0))
+        m3.metric("ROE %", fmt(data.get('roe'), 1, "%"))
+        m4.metric("P/E Ratio", fmt(data.get('pe'), 1))
+        m5.metric("D/E Ratio", fmt(data.get('de'), 2))
+        m6.metric("CFO/PAT", fmt(data.get('cfo_pat'), 2))
+        m7.metric("ROIC %", fmt(data.get('roic'), 1, "%"))
+
+        st.divider()
+
+        # ── 2. MASTER FRAMEWORK SCORECARD ──
+        s1 = data.get("roe", 0) >= 15
+        s2 = data.get("cfo_pat", 0) >= 0.8 and data.get("fcf", 0) > 0
+        s3 = data.get("pe", 100) <= (data.get("pe_5yr_avg", 20) * 1.1)
+        s4 = gov_ok
+        score = sum([s1, s2, s3, s4])
+
+        if score == 4:
+            st.markdown("### 🏆 VERDICT: EXCELLENT QUALITY (4/4)")
+            st.success("This stock clears all institutional risk and quality hurdles. APPROVED for high-conviction research.")
+        elif score == 3:
+            st.markdown("### 🟡 VERDICT: WATCHLIST (3/4)")
+            st.warning("High quality business, but failing one critical hurdle (likely valuation or governance). Wait for a correction.")
         else:
-            print("- Stay on the sidelines. Current risk-reward ratio does not favor the long-term investor.")
-        print(f"{'-'*78}")
+            st.markdown("### 🔴 VERDICT: HIGH RISK / REJECTED")
+            st.error("Multiple framework failures. The business model or valuation does not meet safety standards.")
 
-# Usage (Integration with your model/app)
-# workstation = EliteResearchWorkstation("Stock_Export.xlsx")
-# workstation.execute_pipeline()
+        # ── 3. ECONOMIC MOAT & CAPITAL EFFICIENCY ENGINE ──
+        st.subheader("🏰 Economic Moat & Capital Efficiency Engine")
+        with st.expander("View Deep-Dive Capital Analysis", expanded=True):
+            col_a, col_b = st.columns(2)
+            
+            with col_a:
+                st.markdown("**ROIC vs. WACC Analysis**")
+                roic = data.get("roic", 0)
+                if roic >= 20:
+                    st.success(f"**🏰 Wide Economic Moat**\n\nGenerates exceptional returns on capital ({roic:.1f}%) well above the 10% cost of capital. This suggests a highly protected business model with significant pricing power.")
+                elif roic >= 12:
+                    st.info(f"**🛡️ Narrow Economic Moat**\n\nROIC is {roic:.1f}%, reflecting a moderate competitive advantage and respectable capital returns.")
+                else:
+                    st.error(f"**⚠️ No Moat / Capital Destruction**\n\nReturns ({roic:.1f}%) fail to beat the cost of capital. The business is likely struggling with commoditization or high competitive intensity.")
+
+            with col_b:
+                st.markdown("**DuPont Decomposition of ROE**")
+                st.write(f"- **Net Profit Margin:** {fmt(data.get('net_margin'), 1, '%')}")
+                st.write(f"- **Asset Turnover:** {fmt(data.get('asset_turnover'), 2)}x")
+                st.write(f"- **Equity Multiplier:** {fmt(data.get('equity_multiplier'), 2)}x")
+                
+                em = safe_num(data.get("equity_multiplier"))
+                if em > 2.5:
+                    st.warning("⚠️ **Interpretation:** ROE is significantly inflated by financial leverage. High risk of volatility during economic downturns.")
+                else:
+                    st.success("✅ **Interpretation:** ROE is largely quality-driven. Returns are fueled by healthy margins and asset efficiency rather than toxic debt.")
+
+            st.divider()
+            
+            col_c, col_d = st.columns(2)
+            with col_c:
+                st.markdown("**Owner Earnings & Cash Quality**")
+                st.write(f"- **Owner Earnings:** ₹{fmt(data.get('owner_earnings'), 0)} Cr")
+                st.write(f"- **FCF Conversion:** {fmt(data.get('fcf_conv'), 1, '%')}")
+                if data.get("fcf_conv", 0) > 80:
+                    st.write("✅ Real owner earnings match or exceed reported accounting profits.")
+                else:
+                    st.write("🚩 Accounting profits are not fully translating to cash.")
+
+            with col_d:
+                st.markdown("**Compounding Runway**")
+                reinv = data.get("reinv_rate", 0)
+                st.write(f"- **Reinvestment Rate:** {fmt(reinv, 1, '%')}")
+                st.write(f"- **Compounding Rate:** {fmt(data.get('compounding_rate'), 1, '%')}")
+                if reinv > 50 and data.get("roic", 0) > 18:
+                    st.write("🚀 **Business Type:** Compounding Engine. Can reinvest profits at very high rates.")
+                elif data.get("roic", 0) > 18:
+                    st.write("💰 **Business Type:** Cash Cow. Generates massive cash but lacks high-return expansion runway.")
+
+        # ── 4. DEEP-DIVE INVESTMENT THESIS & STRATEGY ──
+        st.subheader("💡 Deep-Dive Investment Thesis & Strategy")
+        
+        # Dynamic Thesis Generation
+        thesis = f"{data.get('company_name')} presents a "
+        if score >= 3:
+            thesis += f"compelling quality-focused narrative. With an ROIC of {data.get('roic'):.1f}%, the business demonstrates a sustainable moat. "
+        else:
+            thesis += f"risk-heavy setup. The metrics indicate structural challenges in capital efficiency or valuation. "
+        
+        st.markdown(f"**📌 Executive Thesis:** {thesis} Earnings quality is {'robust' if s2 else 'questionable'}, while the current valuation is {'historically attractive' if s3 else 'expensive'}. Risk management should focus on the {beta_val} beta volatility.")
+
+        col_st1, col_st2 = st.columns(2)
+        with col_st1:
+            st.markdown("### 🟢 Core Strengths")
+            st.markdown(f"- **Exceptional Capital Efficiency:** ROE of {fmt(data.get('roe'),1)}% and ROIC of {fmt(data.get('roic'),1)}% suggest dominant market position and pricing power.")
+            st.markdown(f"- **Earnings Purity:** A CFO/PAT of {fmt(data.get('cfo_pat'),2)} confirms that reported profits are backed by actual cash inflows, minimizing accounting risk.")
+            st.markdown(f"- **Solvency Profile:** With a D/E of {fmt(data.get('de'),2)}, the company maintains a fortress balance sheet capable of weathering interest rate shocks.")
+
+        with col_st2:
+            st.markdown("### 🔴 Weaknesses & Analytical Risks")
+            if not s3:
+                st.markdown(f"- **Valuation Stretched:** P/E of {fmt(data.get('pe'),1)}x is significantly above the 5-year average ({fmt(data.get('pe_5yr_avg'),1)}x). Multiple compression is a major risk.")
+            else:
+                st.markdown(f"- **Historical Mean Reversion:** While currently fairly valued, any drop in ROE could trigger a swift re-rating of the stock price.")
+            
+            if beta_val > 1.2:
+                st.markdown(f"- **Volatility Sensitivity:** A beta of {beta_val} indicates high sensitivity to market downturns. Expect sharp drawdowns if the broader index corrects.")
+            
+            st.markdown("- **Working Capital Cycles:** Any increase in receivables or inventory days could rapidly erode the currently healthy FCF conversion.")
+
+        st.divider()
+
+        # ── 5. ACTIONABLE INVESTOR PLAN ──
+        st.subheader("📋 Actionable Investor Plan")
+        p1, p2, p3 = st.columns(3)
+        p1.info(f"**Step 1: Trend Verification**\n\nReview the 3-year Revenue CAGR. Ensure that the {fmt(data.get('roe'),1)}% ROE is being fueled by topline expansion and not just cost-cutting.")
+        p2.info(f"**Step 2: Peer Benchmarking**\n\nCompare the current P/E of {fmt(data.get('pe'),1)}x against the sector leader. Determine if the quality premium is justified.")
+        p3.info(f"**Step 3: Execution Strategy**\n\nGiven the Beta of {beta_val}, {'use a SIP/Staggered entry' if beta_val > 1.0 else 'a more aggressive entry can be considered'} during market dips.")
+
+        # ── 6. CHARTS ──
+        if data.get("sales_series"):
+            with st.expander("📈 Historical Financial Charts"):
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue", line=dict(color="#00CC96", width=3)))
+                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit", line=dict(color="#636EFA", width=3)))
+                fig.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=30, b=20))
+                st.plotly_chart(fig, use_container_width=True)

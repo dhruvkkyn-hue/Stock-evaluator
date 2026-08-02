@@ -6,7 +6,7 @@ import json
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. MANDATORY: PAGE CONFIG
+# 1. MANDATORY: PAGE CONFIG (MUST BE FIRST)
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Institutional Equity Terminal", 
@@ -36,7 +36,7 @@ def resolve_gemini_key(sidebar_key):
     return os.getenv("GEMINI_API_KEY")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. BASELINE PRECISION HELPERS
+# 3. BASELINE PRECISION HELPERS (PRESERVED)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_num(val, default=0.0):
@@ -113,20 +113,18 @@ def parse_file(file):
         data = {"company_name": str(df.iloc[0, 1]).strip()}
         data["sales_series"] = get_row_series(df, r"sales|revenue")
         data["pat_series"]   = get_row_series(df, r"net profit|profit after tax")
-        ebit_series          = get_row_series(df, r"operating profit|ebit")
         
         pat   = data["pat_series"][-1] if data["pat_series"] else 0
         sales = data["sales_series"][-1] if data["sales_series"] else 0
-        ebit  = ebit_series[-1] if ebit_series else 0
+        ebit  = get_latest(df, r"operating profit|ebit") or 0.0
         cfo   = get_latest(df, r"cash from operating|cfo") or 0.0
         pbt   = get_latest(df, r"profit before tax|pbt")
         
-        share_cap  = get_latest(df, r"equity share capital|share capital")
-        reserves   = get_latest(df, r"reserves")
         borrowings = get_latest(df, r"borrowings|total debt") or 0.0
+        reserves   = get_latest(df, r"reserves")
+        share_cap  = get_latest(df, r"equity share capital|share capital")
         total_assets = get_latest(df, r"total assets")
         cash       = get_latest(df, r"cash equivalents|cash & bank|cash") or 0.0
-        capex      = get_latest(df, r"fixed assets purchased|capital expenditure|capex") or 0.0
 
         data["cmp"] = get_latest(df, r"current price|cmp")
         data["market_cap"] = get_latest(df, r"market capitalization|market cap")
@@ -156,11 +154,11 @@ def parse_file(file):
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. GOOGLE GEMINI AI ENGINE (FREE TIER)
+# 5. GOOGLE GEMINI AI ENGINE (WITH RETRY/FALLBACK)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_gemini_summary(metrics_json, api_key):
-    """Uses Google Gemini 1.5 Flash to generate the executive summary."""
+    """Uses Gemini 2.0 Flash with automatic 1.5-flash fallback."""
     if not GEMINI_AVAILABLE:
         st.error("The `google-genai` library is not installed.")
         return None
@@ -169,27 +167,33 @@ def get_gemini_summary(metrics_json, api_key):
         st.warning("⚠️ Please enter your Free Google Gemini API key in the sidebar.")
         return None
     
-    try:
-        # Initialize the modern Gemini Client
-        client = genai.Client(api_key=api_key)
-        
-        prompt_text = (
-            f"You are a Senior Equity Research Analyst. Based on this financial data: {json.dumps(metrics_json)}, "
-            "provide a concise 3-bullet executive analysis for an investor. "
-            "Focus on: 1. Valuation Gap, 2. Financial Health (Piotroski/Altman), 3. Business Momentum. "
-            "Keep it professional and avoid fluff."
-        )
-        
-        # Call gemini-1.5-flash (Free Tier model)
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents=prompt_text
-        )
-        
-        return response.text
-    except Exception as e:
-        st.error(f"❌ Gemini API Error: {str(e)}")
-        return None
+    # Define models to try in order of preference
+    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash-latest"]
+    
+    prompt_text = (
+        f"You are a Senior Equity Research Analyst. Based on this financial data: {json.dumps(metrics_json)}, "
+        "provide a concise 3-bullet executive analysis. Focus on: 1. Valuation Gap, "
+        "2. Financial Health (Piotroski/Altman), 3. Business Momentum."
+    )
+    
+    client = genai.Client(api_key=api_key)
+    
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt_text
+            )
+            return response.text
+        except Exception as e:
+            if "404" in str(e) or "not found" in str(e).lower():
+                continue # Try the next model in the list
+            else:
+                st.error(f"❌ Gemini API Error ({model_name}): {str(e)}")
+                return None
+    
+    st.error("❌ All Gemini model versions (2.0 and 1.5) returned a 404 error. Please check your API project settings.")
+    return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. INVESTOR UI & SIDEBAR
@@ -224,7 +228,7 @@ if up:
         
         with col_ai:
             st.subheader("🤖 Gemini AI Strategic Narrative")
-            if st.button("Generate Free Executive Summary"):
+            if st.button("Generate Executive Summary"):
                 llm_data = {
                     "PE": data['pe'], 
                     "ROIC": data['roic'], 
@@ -232,11 +236,9 @@ if up:
                     "DCF": data['dcf_val'],
                     "Zone": data['altman_zone']
                 }
-                with st.spinner("Gemini is analyzing financial health..."):
+                with st.spinner("Gemini Flash is analyzing financial health..."):
                     summary = get_gemini_summary(llm_data, resolved_key)
                     if summary: st.info(summary)
-            else:
-                st.caption("Using gemini-1.5-flash (Free Tier).")
 
         st.divider()
 
@@ -247,7 +249,7 @@ if up:
         with c2:
             st.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
         with c3:
-            st.metric("Equity Multiplier", fmt(data['equity_multiplier'], 2))
+            st.metric("Leverage", fmt(data['equity_multiplier'], 2))
         with c4:
             st.metric("D/E Ratio", fmt(data['de'], 2))
 
@@ -256,16 +258,16 @@ if up:
         dup1, dup2, dup3 = st.columns(3)
         dup1.metric("Net Margin", fmt(data['net_margin'], 1, "%"))
         dup2.metric("Asset Turn", fmt(data['asset_turnover'], 2))
-        dup3.metric("Leverage", fmt(data['equity_multiplier'], 2))
+        dup3.metric("Equity Multiplier", fmt(data['equity_multiplier'], 2))
 
         # --- CHARTS ---
         if data["sales_series"]:
             with st.expander("📈 View Trends"):
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue"))
-                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit"))
+                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue", line=dict(color="#00CC96")))
+                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit", line=dict(color="#636EFA")))
                 st.plotly_chart(fig, use_container_width=True)
 
 else:
     st.title("🏛️ Strategic Equity Evaluator")
-    st.info("Upload a Screener.in Excel file to begin.")
+    st.info("Please upload a Screener.in Excel file to begin.")

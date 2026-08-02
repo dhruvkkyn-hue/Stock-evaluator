@@ -1,279 +1,195 @@
 import streamlit as st
 import pandas as pd
+import openpyxl
+import io
+import zipfile
 import re
-import os
-import json
-import time
-import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. MANDATORY: PAGE CONFIG (MUST BE FIRST)
+# 1. MANDATORY: PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Institutional Equity Terminal", 
-    layout="wide", 
-    page_icon="💎"
+    page_title="Screener Batch Quant Engine",
+    layout="wide",
+    page_icon="📑"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. SAFE GOOGLE GEMINI IMPORT & API SETUP
-# ─────────────────────────────────────────────────────────────────────────────
-try:
-    from google import genai
-    GEMINI_AVAILABLE = True
-except ImportError:
-    GEMINI_AVAILABLE = False
-
-def resolve_gemini_key(sidebar_key):
-    """Tiered resolution: Sidebar > Streamlit Secrets > Environment Variable."""
-    if sidebar_key:
-        return sidebar_key
-    try:
-        secret_key = st.secrets.get("GEMINI_API_KEY")
-        if secret_key:
-            return secret_key
-    except:
-        pass
-    return os.getenv("GEMINI_API_KEY")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. BASELINE PRECISION HELPERS
+# 2. CORE QUANTITATIVE HELPERS (NON-AI)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def safe_num(val, default=0.0):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return default
+def to_float(val):
+    """Cleans strings and converts to float for calculation/comparison."""
+    if val is None or isinstance(val, (int, float)):
+        return val
     try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
-
-def div_safe(numerator, denominator):
-    n = safe_num(numerator)
-    d = safe_num(denominator)
-    return n / d if d != 0 else 0.0
-
-def fmt(v, d=2, sfx="", prefix=""):
-    if v is None or (isinstance(v, float) and pd.isna(v)):
-        return "N/A"
-    return f"{prefix}{safe_num(v):,.{d}f}{sfx}"
-
-def to_num(val):
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return None
-    s = str(val).strip().replace(",", "").replace("₹", "").replace("Rs.", "")
-    s = re.sub(r"\s*(cr|crores?|%|x|times|inr)\.?\s*$", "", s, flags=re.I)
-    if s.startswith("(") and s.endswith(")"):
-        s = "-" + s[1:-1]
-    try:
+        # Remove currency symbols and commas
+        s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
+        # Handle percentages
+        if '%' in s:
+            return float(s.replace('%', '')) / 100
         return float(s)
     except:
         return None
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. EXTRACTION ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_row_series(df, label_query):
-    label_query = label_query.lower().strip()
-    for r_idx in range(len(df)):
-        cell_label = str(df.iloc[r_idx, 0]).lower().strip()
-        if re.search(label_query, cell_label):
-            return [to_num(val) for val in df.iloc[r_idx, 1:] if to_num(val) is not None]
-    return []
-
-def get_latest(df, labels):
-    if isinstance(labels, str): labels = [labels]
-    for label in labels:
-        series = get_row_series(df, label)
-        if series: return series[-1]
-    return None
-
-def get_tab_value(xl, tab_name_regex, label_regex):
-    try:
-        sheet_name = next((s for s in xl.sheet_names if re.search(tab_name_regex, s, re.I)), None)
-        if not sheet_name: return "N/A"
-        df = pd.read_excel(xl, sheet_name=sheet_name, header=None).astype(str)
-        for r_idx in range(len(df)):
-            cell_val = df.iloc[r_idx, 0].lower()
-            if re.search(label_regex.lower(), cell_val):
-                return df.iloc[r_idx, 1]
+def find_metric_in_ws(ws, label_regex, offset_col=1):
+    """Searches a worksheet for a label and returns the adjacent value."""
+    if not ws:
         return "N/A"
-    except:
-        return "N/A"
-
-def parse_file(file):
-    try:
-        xl = pd.ExcelFile(file, engine="openpyxl")
-        ds_name = next((s for s in xl.sheet_names if "data sheet" in s.lower()), None)
-        if not ds_name:
-            st.error("Critical Failure: 'Data Sheet' tab not found.")
-            return None
-        
-        df = pd.read_excel(xl, sheet_name=ds_name, header=None, dtype=str)
-        data = {"company_name": str(df.iloc[0, 1]).strip()}
-        data["sales_series"] = get_row_series(df, r"sales|revenue")
-        data["pat_series"]   = get_row_series(df, r"net profit|profit after tax")
-        
-        sales = data["sales_series"][-1] if data["sales_series"] else 0
-        pat   = data["pat_series"][-1] if data["pat_series"] else 0
-        ebit  = get_latest(df, r"operating profit|ebit") or 0.0
-        cfo   = get_latest(df, r"cash from operating|cfo") or 0.0
-        pbt   = get_latest(df, r"profit before tax|pbt")
-        
-        borrowings = get_latest(df, r"borrowings|total debt") or 0.0
-        reserves   = get_latest(df, r"reserves")
-        share_cap  = get_latest(df, r"equity share capital|share capital")
-        total_assets = get_latest(df, r"total assets")
-        cash       = get_latest(df, r"cash equivalents|cash & bank|cash") or 0.0
-
-        data["cmp"] = get_latest(df, r"current price|cmp")
-        data["market_cap"] = get_latest(df, r"market capitalization|market cap")
-        data["pe_5yr_avg"] = get_latest(df, [r"5 year avg pe", r"median pe"]) or 20.0
-
-        equity = safe_num(share_cap) + safe_num(reserves)
-        data["de"] = div_safe(borrowings, equity)
-        tax_rate = div_safe((safe_num(pbt) - safe_num(pat)), pbt) if safe_num(pbt) > 0 else 0.25
-        nopat = safe_num(ebit) * (1 - tax_rate)
-        invested_cap = max((equity + safe_num(borrowings) - safe_num(cash)), equity)
-        
-        data["roic"] = div_safe(nopat, invested_cap) * 100
-        data["roe"] = div_safe(pat, equity) * 100
-        data["net_margin"] = div_safe(pat, sales) * 100
-        data["asset_turnover"] = div_safe(sales, total_assets if total_assets else (equity + borrowings))
-        data["equity_multiplier"] = div_safe(total_assets if total_assets else (equity + borrowings), equity)
-        data["pe"] = div_safe(data["market_cap"], pat)
-        data["cfo_pat"] = div_safe(cfo, pat)
-
-        data["piotroski"] = get_tab_value(xl, "Health|Piotroski", "Piotroski F-Score")
-        data["altman_zone"] = get_tab_value(xl, "Health|Piotroski", "Zone")
-        data["dcf_val"] = get_tab_value(xl, "Intrinsic|Summary", "DCF")
-
-        return data
-    except Exception as e:
-        st.error(f"Excel Processing Error: {e}")
-        return None
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value and re.search(label_regex, str(cell.value), re.IGNORECASE):
+                return ws.cell(row=cell.row, column=cell.column + offset_col).value
+    return "N/A"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. GEMINI AI ENGINE (FIXED: 429 RATE LIMIT & QUOTA FALLBACK)
+# 3. PROCESSING PIPELINE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_gemini_summary(metrics_json, api_key):
+def process_screener_workbook(file_bytes, file_name):
     """
-    Handles Gemini API calls with robust fallback for 429 (Quota) and 404 (Missing) errors.
+    Handles sanitization of raw data and extraction of calculated metrics.
     """
-    if not GEMINI_AVAILABLE:
-        st.error("The `google-genai` library is not installed.")
-        return None
+    # Load for both formula preservation and data extraction
+    # We use io.BytesIO to keep everything in memory
+    in_mem_file = io.BytesIO(file_bytes)
     
-    if not api_key:
-        st.warning("⚠️ No Gemini API Key found. Please add it to the sidebar.")
-        return None
+    # Step 1: Load Workbook
+    # Note: data_only=False preserves formulas for the sanitized output
+    # but we need data_only=True to extract the 'Calculated' values for the dashboard
+    wb_formulas = openpyxl.load_workbook(in_mem_file, data_only=False)
+    
+    # Reload a copy to get the calculated values (Screener exports usually have cached values)
+    in_mem_file.seek(0)
+    wb_values = openpyxl.load_workbook(in_mem_file, data_only=True)
+    
+    # --- STEP A: DATA SANITIZATION ('Data Sheet') ---
+    if 'Data Sheet' in wb_formulas.sheetnames:
+        ds = wb_formulas['Data Sheet']
+        # Requirements: Rows 1 to 14, Columns C (3) to L (12)
+        for r in range(1, 15):
+            for c in range(3, 13):
+                cell = ds.cell(row=r, column=c)
+                val = cell.value
+                # If cell contains non-numeric text (excluding None and numeric types)
+                if val is not None and not isinstance(val, (int, float)):
+                    # Check if it's a string that doesn't look like a number
+                    if not str(val).replace('.', '', 1).isdigit():
+                        cell.value = None # Clear it to prevent float errors in Screener backend
+    
+    # --- STEP B: METRIC EXTRACTION FOR DASHBOARD ---
+    # We pull from wb_values to get the results of the formulas
+    metrics = {"File Name": file_name}
+    
+    # Define sheets to scan
+    summary_ws = wb_values['Summary'] if 'Summary' in wb_values.sheetnames else None
+    health_ws = wb_values['Piotroski & Financial Health'] if 'Piotroski & Financial Health' in wb_values.sheetnames else None
+    intrinsic_ws = wb_values['Intrinsic Values'] if 'Intrinsic Values' in wb_values.sheetnames else summary_ws
+    
+    # Extraction Logic
+    metrics["Company"] = find_metric_in_ws(summary_ws or wb_values['Data Sheet'], r"Company|Name", 1)
+    metrics["MCap (Cr)"] = find_metric_in_ws(summary_ws, r"Market Cap", 1)
+    
+    # Health Metrics
+    metrics["Piotroski F-Score"] = find_metric_in_ws(health_ws, r"Piotroski", 1)
+    metrics["Altman Z-Score"] = find_metric_in_ws(health_ws, r"Altman Z", 1)
+    metrics["Altman Zone"] = find_metric_in_ws(health_ws, r"Zone", 1)
+    metrics["Sloan Accrual"] = find_metric_in_ws(health_ws, r"Sloan", 1)
+    
+    # Efficiency & Solvency
+    metrics["D/E Ratio"] = find_metric_in_ws(summary_ws, r"Debt to equity", 1)
+    metrics["ROE (5Yr)"] = find_metric_in_ws(summary_ws, r"Average return on equity 5Years", 1)
+    
+    # Valuation Multiples
+    metrics["P/E"] = find_metric_in_ws(summary_ws, r"Price to Earning", 1)
+    metrics["EV/EBITDA"] = find_metric_in_ws(summary_ws, r"EV / EBITDA", 1)
+    
+    # Valuation Spreads
+    metrics["DCF Spread %"] = find_metric_in_ws(intrinsic_ws, r"DCF.*Spread|Spread.*DCF", 1)
+    metrics["Graham Spread %"] = find_metric_in_ws(intrinsic_ws, r"Graham.*Spread", 1)
 
-    # Priority List: Flash 1.5 is the most stable for Free Tiers. 
-    # Flash 2.0/2.5 are newer and often have '0' limits for specific regions/keys.
-    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+    # Save sanitized workbook to memory
+    processed_output = io.BytesIO()
+    wb_formulas.save(processed_output)
+    processed_output.seek(0)
     
-    prompt_text = (
-        f"Analyze this financial data: {json.dumps(metrics_json)}. "
-        "Provide a 3-bullet executive summary covering Valuation, Health, and Momentum."
-    )
-    
-    client = genai.Client(api_key=api_key)
-    
-    for model_name in models_to_try:
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt_text
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg:
-                # Quota exhausted for this specific model
-                st.write(f"⚠️ {model_name} quota full. Retrying with next model...")
-                time.sleep(2) # Short cooldown for rate limits
-                continue
-            elif "404" in err_msg or "not found" in err_msg.lower():
-                # Model alias not recognized
-                continue
-            else:
-                st.error(f"❌ Gemini Error ({model_name}): {err_msg}")
-                return None
+    return processed_output, metrics
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. STREAMLIT UI & ORCHESTRATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    st.title("📑 Screener.in Batch Quant Engine")
+    st.markdown("""
+    **Standalone Workbook Processor**: Sanitize 'Data Sheet' inputs, preserve formula integrity, 
+    and extract institutional metrics into a master dashboard.
+    """)
+
+    with st.sidebar:
+        st.header("Upload Sector Batch")
+        uploaded_files = st.file_uploader(
+            "Select Screener.in Excel Files", 
+            type=["xlsx"], 
+            accept_multiple_files=True
+        )
+        process_btn = st.button("🚀 Process Batch", type="primary")
+
+    if uploaded_files and process_btn:
+        all_metrics = []
+        processed_files_map = {} # Filename -> BytesIO
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for idx, uploaded_file in enumerate(uploaded_files):
+            try:
+                status_text.text(f"Processing: {uploaded_file.name}...")
                 
-    st.error("❌ All Gemini models exhausted. Please try again in 60 seconds (API Rate Limit).")
-    return None
+                # Run Pipeline
+                file_bytes = uploaded_file.getvalue()
+                processed_buffer, file_metrics = process_screener_workbook(file_bytes, uploaded_file.name)
+                
+                all_metrics.append(file_metrics)
+                processed_files_map[uploaded_file.name] = processed_buffer
+                
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+            except Exception as e:
+                st.error(f"Failed to process {uploaded_file.name}: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. INVESTOR UI & SIDEBAR
-# ─────────────────────────────────────────────────────────────────────────────
+        status_text.success("Batch Processing Complete!")
 
-with st.sidebar:
-    st.title("🛡️ Risk Controls")
-    sidebar_key = st.text_input("Google Gemini API Key", type="password")
-    resolved_key = resolve_gemini_key(sidebar_key)
-    
-    gov_ok = st.checkbox("Governance Verified", value=True)
-    st.divider()
-    up = st.file_uploader("Upload Screener.in Excel", type="xlsx")
+        # --- MASTER DASHBOARD ---
+        if all_metrics:
+            st.subheader("📊 Master Stock Comparison Dashboard")
+            df = pd.DataFrame(all_metrics)
+            
+            # Formatting for display
+            st.dataframe(df.style.highlight_max(axis=0, subset=["ROE (5Yr)"], color='lightgreen'))
 
-if up:
-    data = parse_file(up)
-    
-    if data:
-        st.header(f"💎 {data['company_name']} | Strategic Analysis")
-        
-        # --- SCORECARD & AI SUMMARY ---
-        s1 = data.get("roe", 0) >= 15
-        s2 = data.get("cfo_pat", 0) >= 0.8
-        s3 = data.get("pe", 100) <= (data.get("pe_5yr_avg", 20) * 1.1)
-        score = sum([s1, s2, s3, gov_ok])
+            # --- ZIP EXPORT ---
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                # Add individual sanitized files
+                for name, data in processed_files_map.items():
+                    zip_file.writestr(f"Sanitized_{name}", data.getvalue())
+                
+                # Add Master Excel Summary
+                master_summary_buffer = io.BytesIO()
+                with pd.ExcelWriter(master_summary_buffer, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Comparison_Summary')
+                zip_file.writestr("Master_Stock_Comparison.xlsx", master_summary_buffer.getvalue())
 
-        col_score, col_ai = st.columns([1, 2])
-        with col_score:
-            st.metric("Fundamental Score", f"{score}/4")
-            if score >= 3: st.success("Quality Approved")
-            else: st.warning("High Risk")
-        
-        with col_ai:
-            st.subheader("🤖 AI Strategic Narrative")
-            if st.button("Generate Executive Summary"):
-                llm_data = {
-                    "PE": data['pe'], 
-                    "ROIC": data['roic'], 
-                    "Piotroski": data['piotroski'],
-                    "DCF": data['dcf_val'],
-                    "Zone": data['altman_zone']
-                }
-                with st.spinner("Rotating models to bypass rate limits..."):
-                    summary = get_gemini_summary(llm_data, resolved_key)
-                    if summary: st.info(summary)
+            st.divider()
+            st.download_button(
+                label="📥 Download Processed Batch (.zip)",
+                data=zip_buffer.getvalue(),
+                file_name=f"Screener_Batch_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.zip",
+                mime="application/zip"
+            )
 
-        st.divider()
+    elif not uploaded_files:
+        st.info("Waiting for files to be uploaded via the sidebar.")
 
-        # --- METRICS & DUPONT ---
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("ROIC %", fmt(data['roic'], 1, "%"))
-        c2.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
-        c3.metric("Leverage", fmt(data['equity_multiplier'], 2))
-        c4.metric("D/E Ratio", fmt(data['de'], 2))
-
-        st.subheader("🔬 ROE Engineering (DuPont)")
-        dup1, dup2, dup3 = st.columns(3)
-        dup1.metric("Net Margin", fmt(data['net_margin'], 1, "%"))
-        dup2.metric("Asset Turn", fmt(data['asset_turnover'], 2))
-        dup3.metric("Equity Multiplier", fmt(data['equity_multiplier'], 2))
-
-        # --- CHARTS ---
-        if data["sales_series"]:
-            with st.expander("📈 View Trends"):
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue", line=dict(color="#00CC96")))
-                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit", line=dict(color="#636EFA")))
-                st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.title("🏛️ Strategic Equity Evaluator")
-    st.info("Upload a Screener.in Excel file to begin.")
+if __name__ == "__main__":
+    main()

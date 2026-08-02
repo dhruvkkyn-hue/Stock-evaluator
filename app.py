@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import os
 import json
+import time
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ def resolve_gemini_key(sidebar_key):
     return os.getenv("GEMINI_API_KEY")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. BASELINE PRECISION HELPERS (PRESERVED)
+# 3. BASELINE PRECISION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_num(val, default=0.0):
@@ -114,8 +115,8 @@ def parse_file(file):
         data["sales_series"] = get_row_series(df, r"sales|revenue")
         data["pat_series"]   = get_row_series(df, r"net profit|profit after tax")
         
-        pat   = data["pat_series"][-1] if data["pat_series"] else 0
         sales = data["sales_series"][-1] if data["sales_series"] else 0
+        pat   = data["pat_series"][-1] if data["pat_series"] else 0
         ebit  = get_latest(df, r"operating profit|ebit") or 0.0
         cfo   = get_latest(df, r"cash from operating|cfo") or 0.0
         pbt   = get_latest(df, r"profit before tax|pbt")
@@ -154,26 +155,28 @@ def parse_file(file):
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. GOOGLE GEMINI AI ENGINE (WITH RETRY/FALLBACK)
+# 5. GEMINI AI ENGINE (FIXED: 429 RATE LIMIT & QUOTA FALLBACK)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_gemini_summary(metrics_json, api_key):
-    """Uses Gemini 2.0 Flash with automatic 1.5-flash fallback."""
+    """
+    Handles Gemini API calls with robust fallback for 429 (Quota) and 404 (Missing) errors.
+    """
     if not GEMINI_AVAILABLE:
         st.error("The `google-genai` library is not installed.")
         return None
     
     if not api_key:
-        st.warning("⚠️ Please enter your Free Google Gemini API key in the sidebar.")
+        st.warning("⚠️ No Gemini API Key found. Please add it to the sidebar.")
         return None
-    
-    # Define models to try in order of preference
-    models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash-latest"]
+
+    # Priority List: Flash 1.5 is the most stable for Free Tiers. 
+    # Flash 2.0/2.5 are newer and often have '0' limits for specific regions/keys.
+    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
     
     prompt_text = (
-        f"You are a Senior Equity Research Analyst. Based on this financial data: {json.dumps(metrics_json)}, "
-        "provide a concise 3-bullet executive analysis. Focus on: 1. Valuation Gap, "
-        "2. Financial Health (Piotroski/Altman), 3. Business Momentum."
+        f"Analyze this financial data: {json.dumps(metrics_json)}. "
+        "Provide a 3-bullet executive summary covering Valuation, Health, and Momentum."
     )
     
     client = genai.Client(api_key=api_key)
@@ -184,15 +187,23 @@ def get_gemini_summary(metrics_json, api_key):
                 model=model_name,
                 contents=prompt_text
             )
-            return response.text
+            if response and response.text:
+                return response.text
         except Exception as e:
-            if "404" in str(e) or "not found" in str(e).lower():
-                continue # Try the next model in the list
+            err_msg = str(e)
+            if "429" in err_msg:
+                # Quota exhausted for this specific model
+                st.write(f"⚠️ {model_name} quota full. Retrying with next model...")
+                time.sleep(2) # Short cooldown for rate limits
+                continue
+            elif "404" in err_msg or "not found" in err_msg.lower():
+                # Model alias not recognized
+                continue
             else:
-                st.error(f"❌ Gemini API Error ({model_name}): {str(e)}")
+                st.error(f"❌ Gemini Error ({model_name}): {err_msg}")
                 return None
-    
-    st.error("❌ All Gemini model versions (2.0 and 1.5) returned a 404 error. Please check your API project settings.")
+                
+    st.error("❌ All Gemini models exhausted. Please try again in 60 seconds (API Rate Limit).")
     return None
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -201,7 +212,7 @@ def get_gemini_summary(metrics_json, api_key):
 
 with st.sidebar:
     st.title("🛡️ Risk Controls")
-    sidebar_key = st.text_input("Google Gemini API Key (Free)", type="password", help="Get your free key at aistudio.google.com")
+    sidebar_key = st.text_input("Google Gemini API Key", type="password")
     resolved_key = resolve_gemini_key(sidebar_key)
     
     gov_ok = st.checkbox("Governance Verified", value=True)
@@ -227,7 +238,7 @@ if up:
             else: st.warning("High Risk")
         
         with col_ai:
-            st.subheader("🤖 Gemini AI Strategic Narrative")
+            st.subheader("🤖 AI Strategic Narrative")
             if st.button("Generate Executive Summary"):
                 llm_data = {
                     "PE": data['pe'], 
@@ -236,24 +247,19 @@ if up:
                     "DCF": data['dcf_val'],
                     "Zone": data['altman_zone']
                 }
-                with st.spinner("Gemini Flash is analyzing financial health..."):
+                with st.spinner("Rotating models to bypass rate limits..."):
                     summary = get_gemini_summary(llm_data, resolved_key)
                     if summary: st.info(summary)
 
         st.divider()
 
-        # --- METRIC CARDS ---
+        # --- METRICS & DUPONT ---
         c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("ROIC %", fmt(data['roic'], 1, "%"))
-        with c2:
-            st.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
-        with c3:
-            st.metric("Leverage", fmt(data['equity_multiplier'], 2))
-        with c4:
-            st.metric("D/E Ratio", fmt(data['de'], 2))
+        c1.metric("ROIC %", fmt(data['roic'], 1, "%"))
+        c2.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
+        c3.metric("Leverage", fmt(data['equity_multiplier'], 2))
+        c4.metric("D/E Ratio", fmt(data['de'], 2))
 
-        # --- DUPONT ---
         st.subheader("🔬 ROE Engineering (DuPont)")
         dup1, dup2, dup3 = st.columns(3)
         dup1.metric("Net Margin", fmt(data['net_margin'], 1, "%"))
@@ -270,4 +276,4 @@ if up:
 
 else:
     st.title("🏛️ Strategic Equity Evaluator")
-    st.info("Please upload a Screener.in Excel file to begin.")
+    st.info("Upload a Screener.in Excel file to begin.")

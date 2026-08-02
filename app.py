@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import re
+import os
+import json
+import time
 import plotly.graph_objects as go
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -13,7 +16,28 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. BASELINE PRECISION HELPERS (PRESERVED)
+# 2. SAFE GOOGLE GEMINI IMPORT & API SETUP
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+def resolve_gemini_key(sidebar_key):
+    """Tiered resolution: Sidebar > Streamlit Secrets > Environment Variable."""
+    if sidebar_key:
+        return sidebar_key
+    try:
+        secret_key = st.secrets.get("GEMINI_API_KEY")
+        if secret_key:
+            return secret_key
+    except:
+        pass
+    return os.getenv("GEMINI_API_KEY")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. BASELINE PRECISION HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_num(val, default=0.0):
@@ -27,9 +51,7 @@ def safe_num(val, default=0.0):
 def div_safe(numerator, denominator):
     n = safe_num(numerator)
     d = safe_num(denominator)
-    if d == 0:
-        return 0.0
-    return n / d
+    return n / d if d != 0 else 0.0
 
 def fmt(v, d=2, sfx="", prefix=""):
     if v is None or (isinstance(v, float) and pd.isna(v)):
@@ -49,7 +71,7 @@ def to_num(val):
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. EXTRACTION ENGINE (PRESERVED & WRAPPED)
+# 4. EXTRACTION ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_row_series(df, label_query):
@@ -67,6 +89,19 @@ def get_latest(df, labels):
         if series: return series[-1]
     return None
 
+def get_tab_value(xl, tab_name_regex, label_regex):
+    try:
+        sheet_name = next((s for s in xl.sheet_names if re.search(tab_name_regex, s, re.I)), None)
+        if not sheet_name: return "N/A"
+        df = pd.read_excel(xl, sheet_name=sheet_name, header=None).astype(str)
+        for r_idx in range(len(df)):
+            cell_val = df.iloc[r_idx, 0].lower()
+            if re.search(label_regex.lower(), cell_val):
+                return df.iloc[r_idx, 1]
+        return "N/A"
+    except:
+        return "N/A"
+
 def parse_file(file):
     try:
         xl = pd.ExcelFile(file, engine="openpyxl")
@@ -74,39 +109,30 @@ def parse_file(file):
         if not ds_name:
             st.error("Critical Failure: 'Data Sheet' tab not found.")
             return None
+        
         df = pd.read_excel(xl, sheet_name=ds_name, header=None, dtype=str)
-        
         data = {"company_name": str(df.iloc[0, 1]).strip()}
-        
-        # Core Extraction
         data["sales_series"] = get_row_series(df, r"sales|revenue")
         data["pat_series"]   = get_row_series(df, r"net profit|profit after tax")
-        data["cfo_series"]   = get_row_series(df, r"cash from operating|cfo")
-        ebit_series          = get_row_series(df, r"operating profit|ebit")
         
         sales = data["sales_series"][-1] if data["sales_series"] else 0
         pat   = data["pat_series"][-1] if data["pat_series"] else 0
-        ebit  = ebit_series[-1] if ebit_series else 0
-        cfo   = data["cfo_series"][-1] if data["cfo_series"] else 0
+        ebit  = get_latest(df, r"operating profit|ebit") or 0.0
+        cfo   = get_latest(df, r"cash from operating|cfo") or 0.0
         pbt   = get_latest(df, r"profit before tax|pbt")
         
-        share_cap  = get_latest(df, r"equity share capital|share capital")
-        reserves   = get_latest(df, r"reserves")
         borrowings = get_latest(df, r"borrowings|total debt") or 0.0
+        reserves   = get_latest(df, r"reserves")
+        share_cap  = get_latest(df, r"equity share capital|share capital")
         total_assets = get_latest(df, r"total assets")
         cash       = get_latest(df, r"cash equivalents|cash & bank|cash") or 0.0
-        capex      = get_latest(df, r"fixed assets purchased|capital expenditure|capex") or 0.0
-        depr       = get_latest(df, r"depreciation") or 0.0
 
         data["cmp"] = get_latest(df, r"current price|cmp")
         data["market_cap"] = get_latest(df, r"market capitalization|market cap")
         data["pe_5yr_avg"] = get_latest(df, [r"5 year avg pe", r"median pe"]) or 20.0
 
-        # Calculations
         equity = safe_num(share_cap) + safe_num(reserves)
-        data["equity"] = equity
         data["de"] = div_safe(borrowings, equity)
-        
         tax_rate = div_safe((safe_num(pbt) - safe_num(pat)), pbt) if safe_num(pbt) > 0 else 0.25
         nopat = safe_num(ebit) * (1 - tax_rate)
         invested_cap = max((equity + safe_num(borrowings) - safe_num(cash)), equity)
@@ -116,172 +142,138 @@ def parse_file(file):
         data["net_margin"] = div_safe(pat, sales) * 100
         data["asset_turnover"] = div_safe(sales, total_assets if total_assets else (equity + borrowings))
         data["equity_multiplier"] = div_safe(total_assets if total_assets else (equity + borrowings), equity)
-
-        actual_capex = abs(safe_num(capex))
-        data["fcf"] = safe_num(cfo) - actual_capex
-        data["owner_earnings"] = safe_num(pat) + safe_num(depr) - actual_capex
-        data["fcf_conv"] = div_safe(data["fcf"], pat) * 100
-        data["reinv_rate"] = div_safe(actual_capex, nopat) * 100
-        data["compounding_rate"] = (data["roic"] / 100) * data["reinv_rate"]
-        
         data["pe"] = div_safe(data["market_cap"], pat)
         data["cfo_pat"] = div_safe(cfo, pat)
 
+        data["piotroski"] = get_tab_value(xl, "Health|Piotroski", "Piotroski F-Score")
+        data["altman_zone"] = get_tab_value(xl, "Health|Piotroski", "Zone")
+        data["dcf_val"] = get_tab_value(xl, "Intrinsic|Summary", "DCF")
+
         return data
     except Exception as e:
-        st.error(f"Excel Parsing Error: {e}")
+        st.error(f"Excel Processing Error: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. INVESTOR INTERFACE
+# 5. GEMINI AI ENGINE (FIXED: 429 RATE LIMIT & QUOTA FALLBACK)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_gemini_summary(metrics_json, api_key):
+    """
+    Handles Gemini API calls with robust fallback for 429 (Quota) and 404 (Missing) errors.
+    """
+    if not GEMINI_AVAILABLE:
+        st.error("The `google-genai` library is not installed.")
+        return None
+    
+    if not api_key:
+        st.warning("⚠️ No Gemini API Key found. Please add it to the sidebar.")
+        return None
+
+    # Priority List: Flash 1.5 is the most stable for Free Tiers. 
+    # Flash 2.0/2.5 are newer and often have '0' limits for specific regions/keys.
+    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+    
+    prompt_text = (
+        f"Analyze this financial data: {json.dumps(metrics_json)}. "
+        "Provide a 3-bullet executive summary covering Valuation, Health, and Momentum."
+    )
+    
+    client = genai.Client(api_key=api_key)
+    
+    for model_name in models_to_try:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt_text
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg:
+                # Quota exhausted for this specific model
+                st.write(f"⚠️ {model_name} quota full. Retrying with next model...")
+                time.sleep(2) # Short cooldown for rate limits
+                continue
+            elif "404" in err_msg or "not found" in err_msg.lower():
+                # Model alias not recognized
+                continue
+            else:
+                st.error(f"❌ Gemini Error ({model_name}): {err_msg}")
+                return None
+                
+    st.error("❌ All Gemini models exhausted. Please try again in 60 seconds (API Rate Limit).")
+    return None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. INVESTOR UI & SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.title("🔐 Analyst Controls")
-    ticker = st.text_input("Ticker Symbol", "STOCK").upper()
-    gov_ok = st.checkbox("Governance Verified", value=True, help="Tick if audit is clean and pledging is 0%.")
-    beta_val = st.number_input("Stock Beta", value=1.0, step=0.1)
+    st.title("🛡️ Risk Controls")
+    sidebar_key = st.text_input("Google Gemini API Key", type="password")
+    resolved_key = resolve_gemini_key(sidebar_key)
+    
+    gov_ok = st.checkbox("Governance Verified", value=True)
     st.divider()
     up = st.file_uploader("Upload Screener.in Excel", type="xlsx")
 
-if not up:
-    st.title("🏛️ Strategic Equity Evaluator")
-    st.info("Please upload a Screener.in Excel export to begin high-conviction analysis.")
-else:
+if up:
     data = parse_file(up)
+    
     if data:
-        # --- TOP LEVEL IDENTIFICATION ---
-        st.header(f"💎 {data['company_name']} | Strategic Evaluation")
+        st.header(f"💎 {data['company_name']} | Strategic Analysis")
         
-        # ── 1. INVESTOR PROFILE MATCH ENGINE ──
-        st.subheader("🎯 Investor Mandate Suitability")
-        
-        m_col1, m_col2 = st.columns(2)
-        
-        with m_col1:
-            st.markdown("### 🟢 BUY IF YOUR MANDATE IS:")
-            if data['roic'] > 18 and data['de'] < 0.5:
-                st.success(f"**Long-Term Quality Compounder:** You seek an ROIC of {fmt(data['roic'],1)}% with low financial risk (D/E: {fmt(data['de'])}).")
-            if data['fcf_conv'] > 80:
-                st.success(f"**Cash Flow Purity:** You require reported profits to be backed by actual bank balance ({fmt(data['fcf_conv'],1)}% FCF Conversion).")
-            if data['compounding_rate'] > 15:
-                st.success(f"**Growth Reinvestment:** You back companies that aggressively reinvest ({fmt(data['reinv_rate'],0)}%) to fuel future value.")
-            if data['pe'] < data['pe_5yr_avg']:
-                st.success(f"**Value with Catalyst:** You want to buy quality at a discount to historical norms (Current {fmt(data['pe'],1)}x vs 5Yr Avg {fmt(data['pe_5yr_avg'],1)}x).")
-
-        with m_col2:
-            st.markdown("### 🔴 AVOID / SELL IF YOUR MANDATE IS:")
-            if data['pe'] > (data['pe_5yr_avg'] * 1.25):
-                st.error(f"**Margin of Safety Priority:** Current P/E ({fmt(data['pe'],1)}x) offers zero protection against multiple contraction.")
-            if data['reinv_rate'] > 70:
-                st.error(f"**High Dividend Yield:** This company prioritizes internal growth ({fmt(data['reinv_rate'],0)}% reinvested) over dividend payouts.")
-            if beta_val > 1.3:
-                st.error(f"**Low Volatility Mandate:** The stock beta of {beta_val} suggests sharp price swings that exceed your risk appetite.")
-            if data['owner_earnings'] < (data['pat_series'][-1] * 0.8):
-                st.error(f"**Zero Accounting Risk:** Owner Earnings lag reported profits significantly. High maintenance capex is eating the 'paper profit'.")
-
-        st.divider()
-
-        # ── 2. PLAIN-ENGLISH METRIC WORKSPACE ──
-        st.subheader("📊 Fundamental Health & Intuitive Translations")
-        
-        def metric_card(title, value, translation, status="info"):
-            container = st.container(border=True)
-            if status == "success": color = "green"
-            elif status == "warning": color = "orange"
-            elif status == "error": color = "red"
-            else: color = "blue"
-            
-            container.markdown(f"**{title}**")
-            container.subheader(value)
-            container.caption(f"💡 {translation}")
-
-        # Metrics Grid
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            metric_card("ROIC", fmt(data['roic'], 1, "%"), 
-                        "The actual return generated on every ₹100 of capital deployed.",
-                        "success" if data['roic'] > 15 else "warning")
-            metric_card("Net Margin", fmt(data['net_margin'], 1, "%"),
-                        "Profit kept after all expenses. Pricing power indicator.",
-                        "success" if data['net_margin'] > 12 else "info")
-            
-        with c2:
-            metric_card("CFO/PAT", fmt(data['cfo_pat'], 2),
-                        "Cash Reality Check. > 1.0 means cash is coming in faster than accounting records it.",
-                        "success" if data['cfo_pat'] >= 0.8 else "error")
-            metric_card("Asset Turnover", fmt(data['asset_turnover'], 2) + "x",
-                        "Efficiency: How many ₹ of sales are generated by ₹1 of assets.",
-                        "info")
-
-        with c3:
-            metric_card("Equity Multiplier", fmt(data['equity_multiplier'], 2) + "x",
-                        "Leverage Dosage. > 2.2x indicates heavy reliance on debt to boost returns.",
-                        "warning" if data['equity_multiplier'] > 2.2 else "success")
-            metric_card("Owner Earnings", "₹" + fmt(data['owner_earnings'], 0) + " Cr",
-                        "Spendable cash left for shareholders after essential business upkeep.",
-                        "info")
-
-        with c4:
-            metric_card("Reinv. Rate", fmt(data['reinv_rate'], 1, "%"),
-                        "Growth Fuel: % of cash plowed back into the business for expansion.",
-                        "success" if data['reinv_rate'] > 40 else "info")
-            metric_card("D/E Ratio", fmt(data['de'], 2),
-                        "Solvency: ₹ of debt for every ₹1 of shareholder equity.",
-                        "success" if data['de'] < 0.5 else "error")
-
-        # ── 3. ENHANCED DUPONT DECOMPOSITION ──
-        st.divider()
-        st.subheader("🔬 ROE Engineering (DuPont Analysis)")
-        
-        # Calculate relative weights for the plain-english breakdown
-        # Logarithmic breakdown or simple relative magnitude for "Drivers"
-        total_driver = data['net_margin'] + (data['asset_turnover']*10) + (data['equity_multiplier']*5)
-        margin_contrib = (data['net_margin'] / total_driver) * 100
-        efficiency_contrib = ((data['asset_turnover']*10) / total_driver) * 100
-        leverage_contrib = ((data['equity_multiplier']*5) / total_driver) * 100
-
-        st.markdown(f"### Current ROE: **{fmt(data['roe'], 1, '%')}**")
-        
-        if data['equity_multiplier'] > 2.2:
-            st.error(f"⚠️ **RED FLAG:** ROE of {fmt(data['roe'], 1, '%')} is artificially inflated by high leverage ({fmt(data['equity_multiplier'], 2)}x). This is not operational strength; it is balance sheet risk.")
-        else:
-            st.success(f"✅ **QUALITY SIGN:** ROE is largely driven by margins and efficiency, not toxic levels of debt.")
-
-        dup1, dup2, dup3 = st.columns(3)
-        dup1.metric("1. Profit Margin", fmt(data['net_margin'], 1, "%"), help="Operational Prowess")
-        dup2.metric("2. Asset Efficiency", fmt(data['asset_turnover'], 2) + "x", help="Asset Utilization")
-        dup3.metric("3. Leverage Factor", fmt(data['equity_multiplier'], 2) + "x", help="Financial Gearing")
-        
-        st.info(f"**Plain-English Breakdown:** Your {fmt(data['roe'],1)}% ROE is sourced approximately **{margin_contrib:.0f}% from Profit Margins**, **{efficiency_contrib:.0f}% from Asset Utilization**, and **{leverage_contrib:.0f}% from Financial Debt.**")
-
-        # ── 4. VISUALIZATION ──
-        st.divider()
-        with st.expander("📈 View Revenue vs. Profit Trajectory"):
-            if data["sales_series"]:
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(y=data["sales_series"], name="Top-Line (Sales)", line=dict(color="#2ECC71", width=4)))
-                fig.add_trace(go.Scatter(y=data["pat_series"], name="Bottom-Line (Profit)", line=dict(color="#3498DB", width=4)))
-                fig.update_layout(template="plotly_white", margin=dict(l=20, r=20, t=20, b=20))
-                st.plotly_chart(fig, use_container_width=True)
-
-        # ── 5. FINAL DECISION SCORECARD ──
+        # --- SCORECARD & AI SUMMARY ---
         s1 = data.get("roe", 0) >= 15
         s2 = data.get("cfo_pat", 0) >= 0.8
         s3 = data.get("pe", 100) <= (data.get("pe_5yr_avg", 20) * 1.1)
-        s4 = gov_ok
-        score = sum([s1, s2, s3, s4])
+        score = sum([s1, s2, s3, gov_ok])
+
+        col_score, col_ai = st.columns([1, 2])
+        with col_score:
+            st.metric("Fundamental Score", f"{score}/4")
+            if score >= 3: st.success("Quality Approved")
+            else: st.warning("High Risk")
+        
+        with col_ai:
+            st.subheader("🤖 AI Strategic Narrative")
+            if st.button("Generate Executive Summary"):
+                llm_data = {
+                    "PE": data['pe'], 
+                    "ROIC": data['roic'], 
+                    "Piotroski": data['piotroski'],
+                    "DCF": data['dcf_val'],
+                    "Zone": data['altman_zone']
+                }
+                with st.spinner("Rotating models to bypass rate limits..."):
+                    summary = get_gemini_summary(llm_data, resolved_key)
+                    if summary: st.info(summary)
 
         st.divider()
-        col_res1, col_res2 = st.columns([1, 3])
-        with col_res1:
-            st.header(f"Score: {score}/4")
-        with col_res2:
-            if score == 4:
-                st.balloons()
-                st.success("**INSTITUTIONAL GRADE:** This stock clears every hurdle for quality, cash, and valuation. High conviction candidate.")
-            elif score == 3:
-                st.warning("**WATCHLIST GRADE:** High quality business, but either the price is too high or there is a minor governance/cash flow lag.")
-            else:
-                st.error("**SPECULATIVE / REJECT:** Multiple fundamental failures. Does not meet the 'Safety First' criteria for long-term compounding.")
 
+        # --- METRICS & DUPONT ---
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ROIC %", fmt(data['roic'], 1, "%"))
+        c2.metric("CFO/PAT", fmt(data['cfo_pat'], 2))
+        c3.metric("Leverage", fmt(data['equity_multiplier'], 2))
+        c4.metric("D/E Ratio", fmt(data['de'], 2))
+
+        st.subheader("🔬 ROE Engineering (DuPont)")
+        dup1, dup2, dup3 = st.columns(3)
+        dup1.metric("Net Margin", fmt(data['net_margin'], 1, "%"))
+        dup2.metric("Asset Turn", fmt(data['asset_turnover'], 2))
+        dup3.metric("Equity Multiplier", fmt(data['equity_multiplier'], 2))
+
+        # --- CHARTS ---
+        if data["sales_series"]:
+            with st.expander("📈 View Trends"):
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(y=data["sales_series"], name="Revenue", line=dict(color="#00CC96")))
+                fig.add_trace(go.Scatter(y=data["pat_series"], name="Net Profit", line=dict(color="#636EFA")))
+                st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.title("🏛️ Strategic Equity Evaluator")
+    st.info("Upload a Screener.in Excel file to begin.")

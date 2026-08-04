@@ -5,63 +5,75 @@ import io
 import re
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. SETUP & CONFIGURATION
+# 1. PAGE CONFIGURATION & THEME
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Institutional Equity Terminal", layout="wide", page_icon="⚖️")
-
-# Row Labels to search for (Flexible matching for different sectors/banks)
-MAP = {
-    "revenue": ["sales", "revenue", "interest earned"],
-    "net_profit": ["net profit", "profit after tax"],
-    "market_cap": ["market capitalization", "market cap"],
-    "borrowings": ["borrowings", "total debt"],
-    "equity": ["equity share capital", "share capital"],
-    "reserves": ["reserves"],
-    "assets": ["total assets"],
-    "cfo": ["cash from operating activity", "cfo", "net cashflow from operating"],
-    "op_profit": ["operating profit", "pbit", "operating profit / (loss)"],
-    "liabilities": ["other liabilities", "total liabilities"],
-    "receivables": ["trade receivables", "receivables"],
-    "inventory": ["inventory", "inventories"],
-    "cash": ["cash & bank", "cash equivalents"]
-}
+st.set_page_config(page_title="Institutional Quant Terminal", layout="wide", page_icon="⚖️")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. DYNAMIC PARSING ENGINE
+# 2. SAFE PARSING & MATH HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_row_index(ws, search_terms):
-    """Finds the row index by searching Column A for specific labels."""
+def safe_div(numerator, denominator, default=0.0):
+    """Prevents ZeroDivisionError and handles None/NaN values."""
+    try:
+        if denominator is None or numerator is None:
+            return default
+        num = float(numerator)
+        den = float(denominator)
+        if den == 0:
+            return default
+        return num / den
+    except (ValueError, TypeError, ZeroDivisionError):
+        return default
+
+def safe_float(val, default=0.0):
+    """Cleans currency/string formatting and safely converts to float."""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, (int, float)):
+            return float(val)
+        # Remove currency symbols, commas, and spaces
+        s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
+        if '(' in s and ')' in s: # Handle accounting negative numbers (100)
+            s = "-" + s.replace('(', '').replace(')', '')
+        return float(s)
+    except (ValueError, TypeError):
+        return default
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. DYNAMIC DATA EXTRACTION ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_row_data(ws, labels):
+    """
+    Finds row index by matching labels in Column A and returns 
+    the numeric series from that row.
+    """
+    target_row = None
+    # Search for the first matching label (case-insensitive substring match)
     for row in ws.iter_rows(min_col=1, max_col=1):
-        val = str(row[0].value).lower() if row[0].value else ""
-        if any(term in val for term in search_terms):
-            return row[0].row
-    return None
-
-def get_row_data(ws, row_idx):
-    """Extracts all numeric values from a row, ignoring labels and empty cells."""
-    if not row_idx:
+        cell_val = str(row[0].value).lower() if row[0].value else ""
+        if any(lbl.lower() in cell_val for lbl in labels):
+            target_row = row[0].row
+            break
+    
+    if not target_row:
         return []
+
+    # Extract all numeric values in that row (skipping the label in Col A)
     data = []
     for col in range(2, ws.max_column + 1):
-        val = ws.cell(row=row_idx, column=col).value
-        # Clean numeric data (Screener sometimes exports as strings with commas)
+        val = ws.cell(row=target_row, column=col).value
         if val is not None:
-            try:
-                if isinstance(val, str):
-                    val = val.replace(",", "").replace("₹", "").strip()
-                data.append(float(val))
-            except ValueError:
-                continue
+            data.append(safe_float(val))
     return data
 
-def parse_screener_file(uploaded_file):
-    """Parses a single Screener.in Excel file dynamically."""
+def parse_screener_xlsx(file):
+    """Parses a single Screener.in export file dynamically."""
     try:
-        # Load workbook (data_only=True to get values, not formulas)
-        wb = openpyxl.load_workbook(io.BytesIO(uploaded_file.getvalue()), data_only=True)
-        
-        # Check for 'Data Sheet'
+        # Load with data_only=True to get calculated results, not formula strings
+        wb = openpyxl.load_workbook(io.BytesIO(file.getvalue()), data_only=True)
         ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), None)
         if not ds_name:
             return None
@@ -69,189 +81,172 @@ def parse_screener_file(uploaded_file):
         ws = wb[ds_name]
         company_name = str(ws.cell(row=1, column=2).value).strip()
 
-        # Extract latest numeric values dynamically
-        def fetch_latest(key):
-            idx = get_row_index(ws, MAP[key])
-            series = get_row_data(ws, idx)
-            return series[-1] if series else 0, series
-
-        mcap, _ = fetch_latest("market_cap")
-        net_profit, net_profit_series = fetch_latest("net_profit")
-        sales, sales_series = fetch_latest("revenue")
-        cfo, _ = fetch_latest("cfo")
-        borrowings, borrowings_series = fetch_latest("borrowings")
-        assets, asset_series = fetch_latest("assets")
-        equity, _ = fetch_latest("equity")
-        reserves, _ = fetch_latest("reserves")
-        op_profit, op_profit_series = fetch_latest("op_profit")
-        curr_liab, _ = fetch_latest("liabilities")
-        receivables, _ = fetch_latest("receivables")
-        inventory, _ = fetch_latest("inventory")
-        cash, _ = fetch_latest("cash")
-
-        # ─────────────────────────────────────────────────────────────────────
-        # 3. QUANTITATIVE CALCULATIONS
-        # ─────────────────────────────────────────────────────────────────────
+        # Dynamic Row Lookups
+        sales_series = get_row_data(ws, ["Sales", "Revenue", "Interest Earned"])
+        profit_series = get_row_data(ws, ["Net Profit", "Profit after tax"])
+        op_profit_series = get_row_data(ws, ["Operating Profit", "Operating Profit / (Loss)", "PBIT"])
+        borrowing_series = get_row_data(ws, ["Borrowings", "Total Debt"])
+        cfo_series = get_row_data(ws, ["Cash from Operating", "Net Cashflow from Operating"])
+        asset_series = get_row_data(ws, ["Total Assets"])
+        equity_series = get_row_data(ws, ["Equity Share Capital", "Share Capital"])
+        reserves_series = get_row_data(ws, ["Reserves"])
+        mcap = safe_float(ws.cell(row=11, column=2).value) # Fixed Screener Summary Metadata
         
-        # Financial Health Estimates
-        total_equity = equity + reserves
-        de_ratio = borrowings / total_equity if total_equity != 0 else 0
-        pe_ratio = mcap / net_profit if net_profit > 0 else 0
-        sloan_ratio = (net_profit - cfo) / assets if assets != 0 else 0
+        # Latest Values (Snapshot)
+        curr_sales = sales_series[-1] if sales_series else 0
+        curr_profit = profit_series[-1] if profit_series else 0
+        curr_op_profit = op_profit_series[-1] if op_profit_series else 0
+        curr_borrowings = borrowing_series[-1] if borrowing_series else 0
+        curr_cfo = cfo_series[-1] if cfo_series else 0
+        curr_assets = asset_series[-1] if asset_series else 0
+        curr_equity = equity_series[-1] if equity_series else 0
+        curr_reserves = reserves_series[-1] if reserves_series else 0
+        total_equity = curr_equity + curr_reserves
+
+        # ─── QUANTITATIVE RATIOS (SAFE) ───
+        pe = safe_div(mcap, curr_profit)
+        de = safe_div(curr_borrowings, total_equity)
+        sloan = safe_div(curr_profit - curr_cfo, curr_assets)
         
-        # Altman Z-Score Proxy (Standardized)
-        working_cap = (receivables + inventory + cash) - curr_liab
-        x1 = working_cap / assets if assets != 0 else 0
-        x2 = reserves / assets if assets != 0 else 0
-        x3 = op_profit / assets if assets != 0 else 0
-        x4 = mcap / (borrowings + curr_liab) if (borrowings + curr_liab) != 0 else 0
-        x5 = sales / assets if assets != 0 else 0
+        # Altman Z-Score Proxy
+        # Simplified for Screener structure: WC/TA, RE/TA, EBIT/TA, MCap/Debt, Sales/TA
+        x1 = 0 # Working capital proxy often missing in summary data sheet
+        x2 = safe_div(curr_reserves, curr_assets)
+        x3 = safe_div(curr_op_profit, curr_assets)
+        x4 = safe_div(mcap, curr_borrowings)
+        x5 = safe_div(curr_sales, curr_assets)
         z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (0.99 * x5)
 
         # Piotroski F-Score (out of 8 simplified)
         f_score = 0
-        if net_profit > 0: f_score += 1
-        if cfo > 0: f_score += 1
-        if cfo > net_profit: f_score += 1
-        if len(net_profit_series) > 1 and (net_profit / assets) > (net_profit_series[-2] / (asset_series[-2] if len(asset_series) > 1 else assets)): f_score += 1
-        if len(borrowings_series) > 1 and borrowings <= borrowings_series[-2]: f_score += 1
-        if len(op_profit_series) > 1 and (op_profit / sales) > (op_profit_series[-2] / (sales_series[-2] if len(sales_series) > 1 else sales)): f_score += 1
-        if len(sales_series) > 1 and sales > sales_series[-2]: f_score += 1
-        if assets > 0: f_score += 1 # Asset turnover presence
+        if curr_profit > 0: f_score += 1
+        if curr_cfo > 0: f_score += 1
+        if curr_cfo > curr_profit: f_score += 1
+        if len(profit_series) > 1 and curr_profit > profit_series[-2]: f_score += 1
+        if len(borrowing_series) > 1 and curr_borrowings <= borrowing_series[-2]: f_score += 1
+        if len(sales_series) > 1 and curr_sales > sales_series[-2]: f_score += 1
+        if curr_assets > 0: f_score += 1 
+        if curr_op_profit > 0: f_score += 1
 
         return {
             "Company": company_name,
             "Market Cap": mcap,
-            "P/E Ratio": pe_ratio,
-            "D/E Ratio": de_ratio,
-            "Piotroski Score": f_score,
-            "Altman Z-Score": z_score,
-            "Sloan Ratio": sloan_ratio,
-            "Sales": sales,
-            "Net Profit": net_profit,
-            "CFO": cfo
+            "P/E": pe,
+            "D/E": de,
+            "Sloan": sloan,
+            "Z-Score": z_score,
+            "F-Score": f_score,
+            "Net Profit": curr_profit,
+            "Sales": curr_sales,
+            "CFO": curr_cfo,
+            "Assets": curr_assets
         }
     except Exception as e:
-        st.sidebar.error(f"Error parsing {uploaded_file.name}: {e}")
+        st.sidebar.error(f"Error parsing file: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. MAIN INTERFACE
+# 4. MAIN UI DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.title("🏛️ Institutional Equity Research Terminal")
+st.title("🏛️ Institutional Quantitative Dashboard")
 st.markdown("---")
 
-uploaded_files = st.sidebar.file_uploader("Upload Screener.in Excel Files", type="xlsx", accept_multiple_files=True)
+files = st.sidebar.file_uploader("Upload Screener.in Excels", type="xlsx", accept_multiple_files=True)
 
-if uploaded_files:
-    results = []
-    for file in uploaded_files:
-        data = parse_screener_file(file)
-        if data:
-            results.append(data)
+if files:
+    data_list = []
+    for f in files:
+        parsed = parse_screener_xlsx(f)
+        if parsed:
+            data_list.append(parsed)
 
-    if not results:
-        st.error("No valid data could be parsed. Ensure files are original Screener.in exports.")
-        st.stop()
-
-    df = pd.DataFrame(results)
-
-    # Main Comparison Table
-    st.subheader("📊 Master Metrics Comparison")
-    st.dataframe(
-        df.style.format({
-            "Market Cap": "₹{:,.0f} Cr",
-            "P/E Ratio": "{:.2f}x",
-            "D/E Ratio": "{:.2f}",
-            "Altman Z-Score": "{:.2f}",
-            "Sloan Ratio": "{:.2%}",
-            "Sales": "₹{:,.0f} Cr",
-            "Net Profit": "₹{:,.0f} Cr"
-        }).background_gradient(subset=["Piotroski Score"], cmap="RdYlGn")
-    )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # 5. COMPARATIVE ANALYSIS ENGINE (PLAIN ENGLISH)
-    # ─────────────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("🕵️ Side-by-Side Investment Deep-Dive")
-    
-    col_sel1, col_sel2 = st.columns(2)
-    stock_a_name = col_sel1.selectbox("Select Stock A", df["Company"].unique(), index=0)
-    stock_b_name = col_sel2.selectbox("Select Stock B", df["Company"].unique(), index=min(1, len(df)-1))
-
-    stock_a = df[df["Company"] == stock_a_name].iloc[0]
-    stock_b = df[df["Company"] == stock_b_name].iloc[0]
-
-    # Analysis Logic
-    def get_z_zone(val):
-        if val > 2.99: return "Safe ✅", "Low bankruptcy risk; fortress balance sheet."
-        if val >= 1.81: return "Grey ⚠️", "Moderate risk; monitor debt obligations closely."
-        return "Distress 🚨", "High risk of financial insolvency within 2 years."
-
-    def get_sloan_desc(val):
-        if abs(val) < 0.10: return "High Quality 💎", "Earnings are backed by solid cash flow."
-        return "Aggressive Accruals 🚩", "Non-cash earnings; potential accounting manipulation."
-
-    # 1. Executive Summary
-    st.info(f"### 🏁 Executive Summary")
-    safety_lead = stock_a_name if stock_a["Altman Z-Score"] > stock_b["Altman Z-Score"] else stock_b_name
-    value_lead = stock_a_name if (0 < stock_a["P/E Ratio"] < stock_b["P/E Ratio"]) or (stock_b["P/E Ratio"] <= 0) else stock_b_name
-    
-    st.write(f"""
-    * **Financial Safety Leader:** {safety_lead} (Superior Z-Score and Solvency)
-    * **Valuation / Margin of Safety:** {value_lead} (Lower relative P/E Multiple)
-    """)
-
-    # 2. Deep Dive Metrics
-    c1, c2 = st.columns(2)
-    
-    for stock, col in [(stock_a, c1), (stock_b, c2)]:
-        z_zone, z_desc = get_z_zone(stock["Altman Z-Score"])
-        sloan_zone, sloan_desc = get_sloan_desc(stock["Sloan Ratio"])
+    if data_list:
+        df = pd.DataFrame(data_list)
         
-        with col:
-            st.markdown(f"#### {stock['Company']} Analysis")
-            st.write(f"**Piotroski Score:** `{stock['Piotroski Score']}/8` — " + 
-                     ("Robust operational momentum." if stock['Piotroski Score'] >= 6 else "Weak fundamental trends."))
-            
-            st.write(f"**Altman Zone:** {z_zone}")
-            st.caption(z_desc)
-            
-            st.write(f"**Earnings Quality:** {sloan_zone}")
-            st.caption(sloan_desc)
-            
-            st.write(f"**Valuation Check:** Trading at `{stock['P/E Ratio']:.1f}x` earnings.")
+        # Display Table
+        st.subheader("📊 Comparative Financial Matrix")
+        st.dataframe(df.style.format({
+            "Market Cap": "₹{:,.0f} Cr",
+            "P/E": "{:.2f}x",
+            "D/E": "{:.2f}",
+            "Sloan": "{:.2%}",
+            "Z-Score": "{:.2f}",
+            "Net Profit": "₹{:,.0f} Cr",
+            "Sales": "₹{:,.0f} Cr"
+        }).background_gradient(subset=["F-Score"], cmap="RdYlGn"))
 
-    # 3. Pros & Cons
-    st.markdown("#### ⚖️ Balance Sheet & Growth Quality")
-    p_a, p_b = st.columns(2)
-    
-    for stock, col in [(stock_a, p_a), (stock_b, p_b)]:
-        with col:
-            st.write(f"**Strengths for {stock['Company']}:**")
-            if stock['D/E Ratio'] < 0.5: st.write("- Low leverage; high interest coverage resilience.")
-            if stock['Piotroski Score'] >= 7: st.write("- Exceptional internal management and efficiency.")
-            if stock['CFO'] > stock['Net Profit']: st.write("- Cash conversion is superior to reported profits.")
-            
-            st.write(f"**Potential Risks:**")
-            if stock['D/E Ratio'] > 1.5: st.write("- High debt burden; sensitive to interest rate hikes.")
-            if stock['P/E Ratio'] > 40: st.write("- Aggressive valuation; susceptible to de-rating.")
+        # ─────────────────────────────────────────────────────────────────────
+        # 5. ENGLISH COMPARISON ENGINE (NON-AI)
+        # ─────────────────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("🕵️ Side-by-Side Qualitative Analysis")
+        
+        col1, col2 = st.columns(2)
+        stock_a_name = col1.selectbox("Select Stock A", df["Company"].tolist(), index=0)
+        stock_b_name = col2.selectbox("Select Stock B", df["Company"].tolist(), index=min(1, len(df)-1))
 
-    # 4. Investor Decision Framework
-    st.success("### 🚦 Decision Framework")
-    st.write(f"""
-    **Choose {stock_a_name} if:** You are looking for a **{'Defensive Value' if stock_a['P/E Ratio'] < stock_b['P/E Ratio'] else 'Quality Growth'}** play. 
-    It is best suited for an investor who prioritizes {('earnings purity' if abs(stock_a['Sloan Ratio']) < abs(stock_b['Sloan Ratio']) else 'fundamental safety')}.
+        stock_a = df[df["Company"] == stock_a_name].iloc[0]
+        stock_b = df[df["Company"] == stock_b_name].iloc[0]
 
-    **Choose {stock_b_name} if:** You believe the market is underestimating its **{'pricing power' if stock_b['Piotroski Score'] > stock_a['Piotroski Score'] else 'solvency strength'}**.
+        # ── Analysis Summary ──
+        st.info("### 🏁 Head-to-Head Summary")
+        safety_winner = stock_a_name if stock_a["Z-Score"] > stock_b["Z-Score"] else stock_b_name
+        value_winner = stock_a_name if (0 < stock_a["P/E"] < stock_b["P/E"]) or (stock_b["P/E"] <= 0) else stock_b_name
+        
+        st.write(f"- **Safety Leader:** {safety_winner} displays a more resilient balance sheet profile.")
+        st.write(f"- **Value Leader:** {value_winner} currently offers more attractive entry pricing relative to earnings.")
 
-    **Thesis Inversion Triggers:**
-    1. **Interest Rate Hikes:** Will disproportionately hurt **{stock_a_name if stock_a['D/E Ratio'] > stock_b['D/E Ratio'] else stock_b_name}** due to higher debt levels.
-    2. **Credit Cycle Contraction:** Companies in the **{ 'Distress' if min(stock_a['Altman Z-Score'], stock_b['Altman Z-Score']) < 1.81 else 'Grey'}** Altman zone will face immediate liquidity pressures.
-    3. **Margin Compression:** If raw material costs rise, **{stock_a_name if stock_a['Piotroski Score'] < stock_b['Piotroski Score'] else stock_b_name}** has less operational cushion to protect the bottom line.
-    """)
+        # ── Metric Deep Dive ──
+        c_a, c_b = st.columns(2)
+        for stock, col in [(stock_a, c_a), (stock_b, c_b)]:
+            with col:
+                st.markdown(f"#### {stock['Company']} Evaluation")
+                
+                # Piotroski
+                f = stock["F-Score"]
+                f_desc = "Strong" if f >= 6 else "Average" if f >= 4 else "Weak"
+                st.write(f"**Operational Momentum:** {f}/8 ({f_desc})")
+                
+                # Altman
+                z = stock["Z-Score"]
+                z_zone = "Safe ✅" if z > 2.99 else "Grey ⚠️" if z >= 1.81 else "Distress 🚨"
+                st.write(f"**Insolvency Risk:** {z_zone} (Score: {z:.2f})")
+                
+                # Sloan
+                s = stock["Sloan"]
+                s_desc = "High Quality 💎" if abs(s) < 0.10 else "Low Quality/Aggressive 🚩"
+                st.write(f"**Earnings Quality:** {s_desc} (Ratio: {s:.2%})")
+                
+                # Valuation
+                st.write(f"**Financial Leverage:** D/E of {stock['D/E']:.2f}")
 
+        # ── Pros & Cons ──
+        st.markdown("#### ⚖️ Strategic Strengths & Constraints")
+        p_a, p_b = st.columns(2)
+        for stock, peer, col in [(stock_a, stock_b, p_a), (stock_b, stock_a, p_b)]:
+            with col:
+                st.write(f"**Pros for {stock['Company']}:**")
+                if stock["Z-Score"] > 2.99: st.write("- Fortress balance sheet provides high margin of safety.")
+                if stock["F-Score"] >= 7: st.write("- Exceptional management efficiency and operational trending.")
+                if abs(stock["Sloan"]) < 0.05: st.write("- Conservative accounting; profits are backed by cash.")
+                
+                st.write(f"**Constraints:**")
+                if stock["P/E"] > 50: st.write("- Expensive valuation requires high growth to justify.")
+                if stock["D/E"] > 1.5: st.write("- Elevated debt-to-equity may restrict future expansion.")
+
+        # ── Investor Decision Framework ──
+        st.success("### 🚦 Strategic Decision Framework")
+        st.write(f"""
+        1. **When to favor {stock_a_name}:** If you prioritize **{'Safety & Quality' if stock_a['F-Score'] >= stock_b['F-Score'] else 'Value Opportunity'}**. 
+        {stock_a_name} is the superior choice for a defensive portfolio looking to weather market volatility.
+
+        2. **When to favor {stock_b_name}:** If the investment thesis relies on **{'Operational Turnaround' if stock_b['F-Score'] > 5 else 'Relative Pricing'}**. 
+        This stock is better suited for investors seeking a higher potential return-on-equity play.
+
+        3. **Thesis Inversion Risks:**
+        - **Interest Rate Shocks:** Higher risk for **{stock_a_name if stock_a['D/E'] > stock_b['D/E'] else stock_b_name}** due to debt levels.
+        - **Cyclical Downturn:** **{stock_a_name if stock_a['Z-Score'] < stock_b['Z-Score'] else stock_b_name}** is more vulnerable to bankruptcy during credit freezes.
+        """)
 else:
-    st.info("👋 Welcome! Please upload one or more Screener.in Excel exports in the sidebar to begin institutional-grade analysis.")
+    st.info("👋 Upload Screener.in Excel files in the sidebar to begin analysis.")

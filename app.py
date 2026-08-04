@@ -9,106 +9,130 @@ import re
 # 1. MANDATORY: PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Screener Batch Quant Engine",
+    page_title="Screener Batch Quant Engine (Python Logic)",
     layout="wide",
-    page_icon="📑"
+    page_icon="⚖️"
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. CORE QUANTITATIVE HELPERS (NON-AI)
+# 2. QUANTITATIVE CALCULATION ENGINE (PURE PYTHON)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def to_float(val):
-    """Cleans strings and converts to float for calculation/comparison."""
-    if val is None or isinstance(val, (int, float)):
-        return val
+def safe_float(val):
+    """Converts messy Excel/Screener strings to clean floats."""
+    if val is None or val == "": return 0.0
+    if isinstance(val, (int, float)): return float(val)
     try:
-        # Remove currency symbols and commas
         s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
-        # Handle percentages
-        if '%' in s:
-            return float(s.replace('%', '')) / 100
+        if '(' in s and ')' in s: # Handle accounting negative: (100.00)
+            s = "-" + s.replace('(', '').replace(')', '')
         return float(s)
     except:
-        return None
+        return 0.0
 
-def find_metric_in_ws(ws, label_regex, offset_col=1):
-    """Searches a worksheet for a label and returns the adjacent value."""
-    if not ws:
-        return "N/A"
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value and re.search(label_regex, str(cell.value), re.IGNORECASE):
-                return ws.cell(row=cell.row, column=cell.column + offset_col).value
-    return "N/A"
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. PROCESSING PIPELINE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def process_screener_workbook(file_bytes, file_name):
+def get_row_values(ws, row_idx):
     """
-    Handles sanitization of raw data and extraction of calculated metrics.
+    Returns a list of floats for a specific row index.
+    Screener columns usually: [Label, Mar-2018, Mar-2019, ..., Latest]
+    Index 0: Label | Index 1 onwards: Years
     """
-    # Load for both formula preservation and data extraction
-    # We use io.BytesIO to keep everything in memory
-    in_mem_file = io.BytesIO(file_bytes)
-    
-    # Step 1: Load Workbook
-    # Note: data_only=False preserves formulas for the sanitized output
-    # but we need data_only=True to extract the 'Calculated' values for the dashboard
-    wb_formulas = openpyxl.load_workbook(in_mem_file, data_only=False)
-    
-    # Reload a copy to get the calculated values (Screener exports usually have cached values)
-    in_mem_file.seek(0)
-    wb_values = openpyxl.load_workbook(in_mem_file, data_only=True)
-    
-    # --- STEP A: DATA SANITIZATION ('Data Sheet') ---
-    if 'Data Sheet' in wb_formulas.sheetnames:
-        ds = wb_formulas['Data Sheet']
-        # Requirements: Rows 1 to 14, Columns C (3) to L (12)
-        for r in range(1, 15):
-            for c in range(3, 13):
-                cell = ds.cell(row=r, column=c)
-                val = cell.value
-                # If cell contains non-numeric text (excluding None and numeric types)
-                if val is not None and not isinstance(val, (int, float)):
-                    # Check if it's a string that doesn't look like a number
-                    if not str(val).replace('.', '', 1).isdigit():
-                        cell.value = None # Clear it to prevent float errors in Screener backend
-    
-    # --- STEP B: METRIC EXTRACTION FOR DASHBOARD ---
-    # We pull from wb_values to get the results of the formulas
-    metrics = {"File Name": file_name}
-    
-    # Define sheets to scan
-    summary_ws = wb_values['Summary'] if 'Summary' in wb_values.sheetnames else None
-    health_ws = wb_values['Piotroski & Financial Health'] if 'Piotroski & Financial Health' in wb_values.sheetnames else None
-    intrinsic_ws = wb_values['Intrinsic Values'] if 'Intrinsic Values' in wb_values.sheetnames else summary_ws
-    
-    # Extraction Logic
-    metrics["Company"] = find_metric_in_ws(summary_ws or wb_values['Data Sheet'], r"Company|Name", 1)
-    metrics["MCap (Cr)"] = find_metric_in_ws(summary_ws, r"Market Cap", 1)
-    
-    # Health Metrics
-    metrics["Piotroski F-Score"] = find_metric_in_ws(health_ws, r"Piotroski", 1)
-    metrics["Altman Z-Score"] = find_metric_in_ws(health_ws, r"Altman Z", 1)
-    metrics["Altman Zone"] = find_metric_in_ws(health_ws, r"Zone", 1)
-    metrics["Sloan Accrual"] = find_metric_in_ws(health_ws, r"Sloan", 1)
-    
-    # Efficiency & Solvency
-    metrics["D/E Ratio"] = find_metric_in_ws(summary_ws, r"Debt to equity", 1)
-    metrics["ROE (5Yr)"] = find_metric_in_ws(summary_ws, r"Average return on equity 5Years", 1)
-    
-    # Valuation Multiples
-    metrics["P/E"] = find_metric_in_ws(summary_ws, r"Price to Earning", 1)
-    metrics["EV/EBITDA"] = find_metric_in_ws(summary_ws, r"EV / EBITDA", 1)
-    
-    # Valuation Spreads
-    metrics["DCF Spread %"] = find_metric_in_ws(intrinsic_ws, r"DCF.*Spread|Spread.*DCF", 1)
-    metrics["Graham Spread %"] = find_metric_in_ws(intrinsic_ws, r"Graham.*Spread", 1)
+    row = ws[row_idx]
+    # We skip the first column (label) and take the rest
+    return [safe_float(cell.value) for cell in row[1:] if cell.value is not None]
 
-    # Save sanitized workbook to memory
+def process_and_calculate(file_bytes, file_name):
+    # Load for formulas (to keep zip export intact)
+    in_mem_formulas = io.BytesIO(file_bytes)
+    wb_formulas = openpyxl.load_workbook(in_mem_formulas, data_only=False)
+    
+    # Load for static data extraction
+    in_mem_data = io.BytesIO(file_bytes)
+    wb_data = openpyxl.load_workbook(in_mem_data, data_only=True)
+    
+    metrics = {"File Name": file_name, "Company": file_name.replace(".xlsx", "")}
+    
+    try:
+        if 'Data Sheet' not in wb_data.sheetnames:
+            return None, None
+        
+        ws = wb_data['Data Sheet']
+        
+        # 1. EXTRACT DATA SERIES (Row indices in openpyxl are 1-based)
+        # We assume the LAST item in the row is the 'Latest' year.
+        cmp_val      = safe_float(ws.cell(row=10, column=2).value)
+        mcap_val     = safe_float(ws.cell(row=11, column=2).value)
+        
+        sales        = get_row_values(ws, 15)
+        net_profit   = get_row_values(ws, 27)
+        op_profit    = get_row_values(ws, 32)
+        equity_cap   = get_row_values(ws, 40)
+        reserves     = get_row_values(ws, 41)
+        borrowings   = get_row_values(ws, 43)
+        other_liab   = get_row_values(ws, 44)
+        receivables  = get_row_values(ws, 52)
+        inventory    = get_row_values(ws, 53)
+        cash_bank    = get_row_values(ws, 54)
+        cfo          = get_row_values(ws, 58)
+        
+        # Total Assets calculation (Sum of Liab + Equity)
+        total_assets = [ (e + r + b + ol) for e, r, b, ol in zip(equity_cap, reserves, borrowings, other_liab) ]
+
+        # 2. SELECT LATEST AND PREVIOUS (for YoY)
+        # Use -1 for latest, -2 for previous
+        curr_p = net_profit[-1];   prev_p = net_profit[-2] if len(net_profit) > 1 else curr_p
+        curr_s = sales[-1];        prev_s = sales[-2] if len(sales) > 1 else curr_s
+        curr_cfo = cfo[-1]
+        curr_a = total_assets[-1]
+        curr_b = borrowings[-1];   prev_b = borrowings[-2] if len(borrowings) > 1 else curr_b
+        curr_r = reserves[-1]
+        curr_e = equity_cap[-1]
+        curr_op = op_profit[-1];   prev_op = op_profit[-2] if len(op_profit) > 1 else curr_op
+        curr_ol = other_liab[-1]
+        curr_ca = receivables[-1] + inventory[-1] + cash_bank[-1]
+
+        # 3. CALCULATE DASHBOARD METRICS
+        metrics["Market Cap"] = mcap_val
+        metrics["Latest P/E"] = mcap_val / curr_p if curr_p > 0 else 0.0
+        metrics["Debt/Equity"] = curr_b / (curr_e + curr_r) if (curr_e + curr_r) != 0 else 0.0
+        metrics["Sloan Accrual"] = (curr_p - curr_cfo) / curr_a if curr_a != 0 else 0.0
+        
+        # Altman Z-Score Proxy
+        x1 = (curr_ca - curr_ol) / curr_a if curr_a != 0 else 0
+        x2 = curr_r / curr_a if curr_a != 0 else 0
+        x3 = curr_op / curr_a if curr_a != 0 else 0
+        x4 = mcap_val / (curr_b + curr_ol) if (curr_b + curr_ol) != 0 else 0
+        x5 = curr_s / curr_a if curr_a != 0 else 0
+        z_score = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (0.99 * x5)
+        
+        zone = "Safe" if z_score > 2.99 else ("Grey" if z_score >= 1.81 else "Distress")
+        metrics["Altman Z-Score"] = f"{z_score:.2f} ({zone})"
+        
+        # Piotroski F-Score (out of 8 Proxy)
+        f_score = 0
+        if curr_p > 0: f_score += 1             # 1. Profitability
+        if curr_cfo > 0: f_score += 1           # 2. Cash Flow
+        if curr_p / curr_a > prev_p / (total_assets[-2] if len(total_assets)>1 else curr_a): f_score += 1 # 3. ROA YoY
+        if curr_cfo > curr_p: f_score += 1      # 4. Accrual
+        if curr_b <= prev_b: f_score += 1       # 5. Leverage Improvement
+        if curr_ca/curr_ol > ( (receivables[-2]+inventory[-2]+cash_bank[-2])/other_liab[-2] if len(other_liab)>1 else 0): f_score += 1 # 6. Liquidity
+        if (curr_op/curr_s) > (prev_op/prev_s if prev_s != 0 else 0): f_score += 1 # 7. OPM improvement
+        if curr_s > prev_s: f_score += 1        # 8. Sales Growth
+        
+        metrics["Piotroski Score"] = f"{f_score}/8"
+        metrics["OPM %"] = (curr_op / curr_s)
+
+    except Exception as e:
+        metrics["Status"] = f"Calculation Error: {e}"
+
+    # Sanitization Range (Preserving formula workbook for zip)
+    ds_formulas = wb_formulas['Data Sheet']
+    for r in range(1, 15):
+        for c in range(3, 13):
+            cell = ds_formulas.cell(row=r, column=c)
+            if cell.value is not None and not isinstance(cell.value, (int, float)):
+                if not str(cell.value).replace('.', '', 1).isdigit():
+                    cell.value = None
+
     processed_output = io.BytesIO()
     wb_formulas.save(processed_output)
     processed_output.seek(0)
@@ -116,80 +140,71 @@ def process_screener_workbook(file_bytes, file_name):
     return processed_output, metrics
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. STREAMLIT UI & ORCHESTRATION
+# 3. STREAMLIT UI
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    st.title("📑 Screener.in Batch Quant Engine")
-    st.markdown("""
-    **Standalone Workbook Processor**: Sanitize 'Data Sheet' inputs, preserve formula integrity, 
-    and extract institutional metrics into a master dashboard.
-    """)
+    st.title("⚖️ Institutional Quant Dashboard Engine")
+    st.subheader("Batch Process Screener.in Files with Python Calculation Logic")
 
-    with st.sidebar:
-        st.header("Upload Sector Batch")
-        uploaded_files = st.file_uploader(
-            "Select Screener.in Excel Files", 
-            type=["xlsx"], 
-            accept_multiple_files=True
-        )
-        process_btn = st.button("🚀 Process Batch", type="primary")
+    uploaded_files = st.sidebar.file_uploader(
+        "Upload Raw Screener Excel Files", 
+        type=["xlsx"], 
+        accept_multiple_files=True
+    )
+    
+    if st.sidebar.button("🚀 Process & Generate Dashboard"):
+        if not uploaded_files:
+            st.warning("Please upload files first.")
+            return
 
-    if uploaded_files and process_btn:
         all_metrics = []
-        processed_files_map = {} # Filename -> BytesIO
+        zip_buffer = io.BytesIO()
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-        for idx, uploaded_file in enumerate(uploaded_files):
-            try:
-                status_text.text(f"Processing: {uploaded_file.name}...")
-                
-                # Run Pipeline
-                file_bytes = uploaded_file.getvalue()
-                processed_buffer, file_metrics = process_screener_workbook(file_bytes, uploaded_file.name)
-                
-                all_metrics.append(file_metrics)
-                processed_files_map[uploaded_file.name] = processed_buffer
-                
-                progress_bar.progress((idx + 1) / len(uploaded_files))
-            except Exception as e:
-                st.error(f"Failed to process {uploaded_file.name}: {e}")
-
-        status_text.success("Batch Processing Complete!")
-
-        # --- MASTER DASHBOARD ---
-        if all_metrics:
-            st.subheader("📊 Master Stock Comparison Dashboard")
-            df = pd.DataFrame(all_metrics)
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            progress = st.progress(0)
             
-            # Formatting for display
-            st.dataframe(df.style.highlight_max(axis=0, subset=["ROE (5Yr)"], color='lightgreen'))
-
-            # --- ZIP EXPORT ---
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                # Add individual sanitized files
-                for name, data in processed_files_map.items():
-                    zip_file.writestr(f"Sanitized_{name}", data.getvalue())
+            for idx, up_file in enumerate(uploaded_files):
+                processed_buffer, m = process_and_calculate(up_file.getvalue(), up_file.name)
                 
-                # Add Master Excel Summary
-                master_summary_buffer = io.BytesIO()
-                with pd.ExcelWriter(master_summary_buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Comparison_Summary')
-                zip_file.writestr("Master_Stock_Comparison.xlsx", master_summary_buffer.getvalue())
+                if m:
+                    all_metrics.append(m)
+                    zip_file.writestr(f"Processed_{up_file.name}", processed_buffer.getvalue())
+                
+                progress.progress((idx + 1) / len(uploaded_files))
 
-            st.divider()
-            st.download_button(
-                label="📥 Download Processed Batch (.zip)",
-                data=zip_buffer.getvalue(),
-                file_name=f"Screener_Batch_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.zip",
-                mime="application/zip"
-            )
+            # Add master summary to ZIP
+            df_summary = pd.DataFrame(all_metrics)
+            summary_buffer = io.BytesIO()
+            df_summary.to_excel(summary_buffer, index=False)
+            zip_file.writestr("Master_Comparison_Report.xlsx", summary_buffer.getvalue())
 
-    elif not uploaded_files:
-        st.info("Waiting for files to be uploaded via the sidebar.")
+        st.success("Analysis Complete!")
+
+        # ── MASTER DASHBOARD DISPLAY ──
+        df = pd.DataFrame(all_metrics)
+        
+        # Use columns if they exist
+        display_cols = ["Company", "Market Cap", "Latest P/E", "Debt/Equity", "Sloan Accrual", "Altman Z-Score", "Piotroski Score", "OPM %"]
+        df_display = df[[c for c in display_cols if c in df.columns]]
+
+        # Formatting
+        st.dataframe(
+            df_display.style.format({
+                "Market Cap": "₹ {:,.0f} Cr",
+                "Latest P/E": "{:.1f}x",
+                "Debt/Equity": "{:.2f}",
+                "Sloan Accrual": "{:.1%}",
+                "OPM %": "{:.1%}"
+            }).background_gradient(subset=["Latest P/E"], cmap="RdYlGn_r")
+        )
+
+        st.download_button(
+            label="📥 Download All Processed Files & Master Report (.zip)",
+            data=zip_buffer.getvalue(),
+            file_name=f"Quant_Batch_Report.zip",
+            mime="application/zip"
+        )
 
 if __name__ == "__main__":
     main()

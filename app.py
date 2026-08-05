@@ -5,117 +5,89 @@ import io
 import zipfile
 import re
 import plotly.express as px
-import json
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. CORE CONFIGURATION & SAFE MATH
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Institutional Quant Terminal", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="Institutional Equity Research Terminal", layout="wide", page_icon="⚖️")
 
 def safe_float(val, default=0.0):
-    """Robust conversion of Excel cells to float, handling currency and accounting parens."""
     if val is None: return default
     try:
         if isinstance(val, (int, float)): return float(val)
         s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
-        if s.startswith('(') and s.endswith(')'):
-            s = "-" + s[1:-1]
+        if s.startswith('(') and s.endswith(')'): s = "-" + s[1:-1]
         return float(s)
-    except (ValueError, TypeError):
-        return default
+    except: return default
 
 def safe_div(n, d, default=0.0):
-    """Prevents ZeroDivisionError."""
     try:
         n_f, d_f = float(n or 0), float(d or 0)
         return n_f / d_f if d_f != 0 else default
-    except:
-        return default
+    except: return default
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. HEURISTIC DATA EXTRACTION ENGINE
+# 2. HEURISTIC EXTRACTION ENGINE (CRASH-PROOF)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def find_row_series(ws, keywords):
-    """
-    Scans Column A and B for labels. 
-    Returns the full list of numeric values found in that row across columns.
-    """
     kw_lower = [k.lower() for k in keywords]
-    
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=2):
         label_a = str(row[0].value or "").strip().lower()
         label_b = str(row[1].value or "").strip().lower()
         combined = f"{label_a} {label_b}"
-        
         if any(k in combined for k in kw_lower):
             row_idx = row[0].row
-            # Extract all numeric values across the row starting from column 2
             vals = []
             for col_idx in range(2, ws.max_column + 1):
                 val = safe_float(ws.cell(row=row_idx, column=col_idx).value, None)
-                if val is not None:
-                    vals.append(val)
+                if val is not None: vals.append(val)
             return vals
     return []
 
-def get_latest(series, default=0.0):
-    return series[-1] if series else default
-
-def get_prev(series, default=0.0):
-    return series[-2] if len(series) > 1 else get_latest(series, default)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. PROCESSING WORKFLOW
-# ─────────────────────────────────────────────────────────────────────────────
-
 def process_workbook(file_bytes, filename):
     try:
-        # data_only=True is critical to read the results of formulas saved by Screener
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
         ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), None)
         if not ds_name: return None, None
         ws = wb[ds_name]
 
-        # --- KEYWORD DICTIONARY MAPPING ---
         data_map = {
-            "mcap": find_row_series(ws, ["Market Capitalization", "Market Cap", "Mar Cap", "Current Market", "CMP"]),
-            "sales": find_row_series(ws, ["Sales", "Revenue", "Total Revenue", "Interest Earned", "Income"]),
-            "op": find_row_series(ws, ["Operating Profit", "EBITDA", "EBIT", "Operating Loss", "Financing Profit"]),
-            "pat": find_row_series(ws, ["Net Profit", "Profit after tax", "PAT", "PAT for the year"]),
-            "debt": find_row_series(ws, ["Borrowings", "Total Debt", "Long term borrowings", "Short term borrowings"]),
-            "liab": find_row_series(ws, ["Other Liabilities", "Current Liabilities", "Total Liabilities"]),
-            "reserves": find_row_series(ws, ["Reserves", "Retained Earnings", "Other Equity"]),
-            "equity": find_row_series(ws, ["Equity Share Capital", "Share Capital", "Equity Capital"]),
-            "cfo": find_row_series(ws, ["Cash from Operating", "Operating Cash Flow", "CFO", "Cash flow from operations"]),
-            "receivables": find_row_series(ws, ["Receivables", "Trade Receivables", "Sundry Debtors"]),
-            "inventory": find_row_series(ws, ["Inventory", "Stock", "Inventories"]),
-            "cash": find_row_series(ws, ["Cash & Bank", "Cash Equivalents", "Bank Balance"]),
-            "interest": find_row_series(ws, ["Interest", "Finance Costs", "Interest Expensed"])
+            "mcap": ["Market Capitalization", "Market Cap", "Mar Cap", "Current Market", "CMP"],
+            "sales": ["Sales", "Revenue", "Total Revenue", "Interest Earned", "Income"],
+            "op": ["Operating Profit", "EBITDA", "EBIT", "Operating Loss", "Financing Profit"],
+            "pat": ["Net Profit", "Profit after tax", "PAT", "PAT for the year"],
+            "debt": ["Borrowings", "Total Debt", "Long term borrowings", "Short term borrowings"],
+            "liab": ["Other Liabilities", "Current Liabilities", "Total Liabilities"],
+            "reserves": ["Reserves", "Retained Earnings", "Other Equity"],
+            "equity": ["Equity Share Capital", "Share Capital", "Equity Capital"],
+            "cfo": ["Cash from Operating", "Operating Cash Flow", "CFO", "Cash flow from operations"],
+            "receivables": ["Receivables", "Trade Receivables", "Sundry Debtors"],
+            "inventory": ["Inventory", "Stock", "Inventories"],
+            "cash": ["Cash & Bank", "Cash Equivalents", "Bank Balance"],
+            "interest": ["Interest", "Finance Costs", "Interest Expensed"]
         }
 
-        # Latest Year Snapshot
-        cur = {k: get_latest(v) for k, v in data_map.items()}
-        # Previous Year (for YoY Momentum)
-        pre = {k: get_prev(v) for k, v in data_map.items()}
+        # Extract latest year data
+        cur = {k: find_row_series(ws, v)[-1] if find_row_series(ws, v) else 0.0 for k, v in data_map.items()}
+        # Extract series for momentum
+        series_map = {k: find_row_series(ws, v) for k, v in data_map.items()}
 
         total_eq = cur['equity'] + cur['reserves']
         total_assets = total_eq + cur['debt'] + cur['liab']
-        prev_assets = (pre['equity'] + pre['reserves'] + pre['debt'] + pre['liab']) or total_assets
-
-        # ── Quantitative Ratios ──
+        
         res = {"Company": str(ws.cell(row=1, column=2).value).strip()}
-        res["Market Cap (Cr)"] = cur['mcap']
-        res["Sales (Cr)"] = cur['sales']
-        res["Net Profit (Cr)"] = cur['pat']
-        res["CFO (Cr)"] = cur['cfo']
+        res["Market Cap"] = cur['mcap']
+        res["Sales"] = cur['sales']
+        res["Net Profit"] = cur['pat']
+        res["CFO"] = cur['cfo']
         res["OPM %"] = safe_div(cur['op'], cur['sales']) * 100
-        res["P/E"] = safe_div(cur['mcap'], cur['pat'])
+        res["PE"] = safe_div(cur['mcap'], cur['pat'])
         res["D/E"] = safe_div(cur['debt'], total_eq)
         res["Sloan %"] = safe_div(cur['pat'] - cur['cfo'], total_assets) * 100
         res["EV/EBITDA"] = safe_div(cur['mcap'] + cur['debt'] - cur['cash'], cur['op'])
         
-        # Altman Z-Score Proxy
+        # Altman Z-Score
         x1 = safe_div((cur['receivables'] + cur['inventory'] + cur['cash']) - cur['liab'], total_assets)
         x2 = safe_div(cur['reserves'], total_assets)
         x3 = safe_div(cur['op'], total_assets)
@@ -129,10 +101,10 @@ def process_workbook(file_bytes, filename):
         if cur['pat'] > 0: f += 1
         if cur['cfo'] > 0: f += 1
         if cur['cfo'] > cur['pat']: f += 1
-        if safe_div(cur['pat'], total_assets) > safe_div(pre['pat'], prev_assets): f += 1
-        if cur['debt'] <= pre['debt']: f += 1
-        if safe_div(cur['op'], cur['sales']) > safe_div(pre['op'], pre['sales']): f += 1
-        if cur['sales'] > pre['sales']: f += 1
+        if len(series_map['pat']) > 1 and safe_div(cur['pat'], total_assets) > safe_div(series_map['pat'][-2], total_assets): f += 1
+        if cur['debt'] <= (series_map['debt'][-2] if len(series_map['debt']) > 1 else cur['debt']): f += 1
+        if safe_div(cur['op'], cur['sales']) > safe_div(series_map['op'][-2] if len(series_map['op']) > 1 else 0, series_map['sales'][-2] if len(series_map['sales']) > 1 else 1): f += 1
+        if len(series_map['sales']) > 1 and cur['sales'] > series_map['sales'][-2]: f += 1
         if total_assets > 0: f += 1
         res["Piotroski"] = f
 
@@ -142,17 +114,16 @@ def process_workbook(file_bytes, filename):
         return None, None
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. DASHBOARD UI
+# 3. UI DASHBOARD & COMPARISON
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.title("🏛️ Institutional Quant Terminal")
-st.sidebar.header("Batch Ingestion")
+st.title("🏛️ Institutional Equity Terminal")
+st.sidebar.header("Batch Processing")
 up_files = st.sidebar.file_uploader("Upload Screener Excels", type="xlsx", accept_multiple_files=True)
 
 if up_files:
     results = []
     zip_bytes = io.BytesIO()
-    
     with zipfile.ZipFile(zip_bytes, 'w') as zf:
         for f in up_files:
             data, b_content = process_workbook(f.getvalue(), f.name)
@@ -162,92 +133,126 @@ if up_files:
 
     if results:
         df = pd.DataFrame(results)
-        
-        # --- Summary Viz ---
-        c1, c2 = st.columns([2,1])
-        with c1:
-            st.subheader("📊 Piotroski Momentum & Health Zone")
-            fig = px.bar(df, x="Company", y="Piotroski", color="Zone",
-                         color_discrete_map={"Safe": "#2ecc71", "Grey": "#f39c12", "Distress": "#e74c3c"},
-                         text_auto=True)
-            st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            st.subheader("📥 Export")
-            st.download_button("Download ZIP Package", zip_bytes.getvalue(), "Quant_Batch.zip", "application/zip")
-
-        # --- Master Table ---
-        st.subheader("📋 Master Quant Comparison")
+        st.subheader("📋 Master Quantitative Matrix")
         st.dataframe(df.style.format({
-            "Market Cap (Cr)": "₹{:,.0f}", "Sales (Cr)": "₹{:,.0f}", "Net Profit (Cr)": "₹{:,.0f}",
-            "P/E": "{:.1f}x", "D/E": "{:.2f}", "Sloan %": "{:.2f}%", "Altman Z": "{:.2f}", "OPM %": "{:.1f}%"
+            "Market Cap": "₹{:,.0f}", "Sales": "₹{:,.0f}", "Net Profit": "₹{:,.0f}",
+            "PE": "{:.1f}x", "D/E": "{:.2f}", "Sloan %": "{:.2f}%", "Altman Z": "{:.2f}", "OPM %": "{:.1f}%"
         }).background_gradient(subset=["Piotroski"], cmap="RdYlGn"))
 
         # ─────────────────────────────────────────────────────────────────────
-        # 5. ENGLISH COMPARISON ENGINE
+        # 4. STRATEGIC DEEP-DIVE (2 TO 5 COMPANIES)
         # ─────────────────────────────────────────────────────────────────────
         st.divider()
-        st.header("🕵️ Comparative Strategic Deep-Dive")
+        st.header("🕵️ Strategic Multi-Company Deep-Dive")
         
-        sel_col1, sel_col2 = st.columns(2)
-        sa_name = sel_col1.selectbox("Benchmark Stock (A)", df["Company"].unique(), index=0)
-        sb_name = sel_col2.selectbox("Comparison Stock (B)", df["Company"].unique(), index=min(1, len(df)-1))
-        
-        A = df[df["Company"] == sa_name].iloc[0]
-        B = df[df["Company"] == sb_name].iloc[0]
+        selected_companies = st.multiselect(
+            "Select Companies for Deep-Dive (Choose 2 to 5):",
+            options=df["Company"].unique(),
+            default=df["Company"].unique()[:min(5, len(df))]
+        )
 
-        # --- A. Snapshot ---
-        st.subheader("1. Head-to-Head Summary")
-        safest = sa_name if (A['Piotroski'] + A['Altman Z']) > (B['Piotroski'] + B['Altman Z']) else sb_name
-        cheapest = sa_name if (0 < A['P/E'] < B['P/E']) or (B['P/E'] <= 0) else sb_name
-        
-        sn1, sn2 = st.columns(2)
-        sn1.metric("Financial Health Leader", safest)
-        sn2.metric("Valuation Lead (P/E)", cheapest)
+        if len(selected_companies) < 2:
+            st.info("Please select at least 2 companies to enable side-by-side comparative narrative.")
+        elif len(selected_companies) > 5:
+            st.warning("Deep-Dive analysis is optimized for a maximum of 5 companies. Please reduce selection.")
+        else:
+            comp_data = [df[df["Company"] == name].iloc[0] for name in selected_companies]
+            
+            # --- Paragraph Analysis Engine ---
+            st.subheader("📊 Institutional Metric Interpretations")
 
-        # --- B. Metric Logic ---
-        st.subheader("2. Detailed Qualitative Breakdown")
-        t1, t2, t3 = st.tabs(["Operational Momentum", "Insolvency Risk", "Earnings Quality"])
-        
-        with t1:
-            st.write(f"**Piotroski Score:** {sa_name} ({A['Piotroski']}/8) vs {sb_name} ({B['Piotroski']}/8)")
-            st.write(f"A higher score indicates superior internal management and consistent YoY improvements in profitability and leverage.")
-        
-        with t2:
-            st.write(f"**Altman Z Risk:** {sa_name} is in the **{A['Zone']}** Zone (Z: {A['Altman Z']:.2f}). {sb_name} is in the **{B['Zone']}** Zone (Z: {B['Altman Z']:.2f}).")
-            st.caption("Safe > 2.99 | Grey 1.8-2.9 | Distress < 1.8. Low scores signal potential bankruptcy risk.")
+            # 1. Market Cap
+            mcap_text = "The selected cohort represents a diverse spectrum of market presence. "
+            for c in comp_data:
+                size = "Large-Cap (Institutional safe-haven)" if c['Market Cap'] > 20000 else "Mid-Cap (Growth-focused)" if c['Market Cap'] > 5000 else "Small-Cap (High-risk/High-reward)"
+                mcap_text += f"**{c['Company']}** operates as a {size} with a capitalization of ₹{c['Market Cap']:,.0f} Cr. "
+            mcap_text += "Larger caps in this group offer superior liquidity and defensive moats, whereas the smaller entities present potential for high-growth runaway performance but require closer scrutiny of their volatility profiles."
+            st.markdown(f"**Market Scale & Institutional Reach:** {mcap_text}")
 
-        with t3:
-            st.write(f"**Sloan Accrual Ratio:** {sa_name} ({A['Sloan %']:.1f}%) | {sb_name} ({B['Sloan %']:.1f}%)")
-            st.write("A Sloan ratio under 10% indicates 'Clean' accounting where profits are backed by actual cash flow. Values above 10% suggest 'Paper Profits' driven by non-cash accruals.")
+            # 2. Valuation
+            val_text = "Valuation dispersion across the group suggests varying market expectations. "
+            for c in comp_data:
+                val_text += f"**{c['Company']}** is currently priced at a P/E of {c['PE']:.1f}x and EV/EBITDA of {c['EV/EBITDA']:.1f}x. "
+            val_text += "A high multiple generally signals that investors are pricing in aggressive future growth or dominant quality, while lower multiples may either represent a significant 'Margin of Safety' or a potential 'Value Trap' where fundamental deterioration is already being anticipated by the market."
+            st.markdown(f"**Valuation & Market Expectations:** {val_text}")
 
-        # --- C. Pros & Cons ---
-        st.subheader("3. Institutional Strengths & Weaknesses")
-        pa, pb = st.columns(2)
-        for stock, col in [(A, pa), (B, pb)]:
-            with col:
-                st.markdown(f"**{stock['Company']}**")
-                # Strengths
-                if stock['Piotroski'] >= 7: st.markdown("- 🟢 Top-tier operational efficiency.")
-                if stock['Altman Z'] > 2.99: st.markdown("- 🟢 Balance sheet is a defensive fortress.")
-                if stock['D/E'] < 0.3: st.markdown("- 🟢 Virtually no debt risk.")
-                if abs(stock['Sloan %']) < 5: st.markdown("- 🟢 High-quality cash-backed earnings.")
-                # Weaknesses
-                if stock['P/E'] > 50: st.markdown("- 🔴 Aggressive valuation; zero margin of safety.")
-                if stock['D/E'] > 1.2: st.markdown("- 🔴 High leverage; sensitive to interest rates.")
-                if stock['Zone'] == "Distress": st.markdown("- 🔴 Critical insolvency warning signals.")
+            # 3. OPM
+            opm_text = "Operating margins provide a window into the core pricing power and structural efficiencies of these businesses. "
+            for c in comp_data:
+                opm_text += f"**{c['Company']}** maintains an OPM of {c['OPM %']:.1f}%. "
+            opm_text += "Companies with higher margins in this cohort demonstrate superior cost-structure resilience and pricing power, allowing them to better absorb inflationary pressures in raw materials without sacrificing bottom-line integrity."
+            st.markdown(f"**Pricing Power & Cost Resilience:** {opm_text}")
 
-        # --- D. Framework ---
-        st.subheader("4. Strategic Decision Matrix")
-        f1, f2 = st.columns(2)
-        with f1:
-            st.markdown(f"#### 🏆 Favor {sa_name} if:")
-            if A['P/E'] < B['P/E']: st.write("- You prioritize lower entry multiples and value.")
-            if A['Altman Z'] > B['Altman Z']: st.write("- You are building a defensive portfolio.")
-        with f2:
-            st.markdown(f"#### 🏆 Favor {sb_name} if:")
-            if B['OPM %'] > A['OPM %']: st.write("- You are backing superior pricing power and market dominance.")
-            if B['Piotroski'] > A['Piotroski']: st.write("- You prefer stocks with accelerating operational momentum.")
+            # 4. Sloan Ratio
+            sloan_text = "Earnings quality is scrutinized through the Sloan Accrual Ratio, distinguishing between 'Accounting Profits' and 'Cash Profits.' "
+            for c in comp_data:
+                quality = "High-quality cash conversion" if abs(c['Sloan %']) < 10 else "Aggressive non-cash accruals"
+                sloan_text += f"**{c['Company']}** reports a Sloan Ratio of {c['Sloan %']:.2f}%, indicating {quality}. "
+            sloan_text += "Ratios exceeding the 10% threshold flag a potential mismatch between reported PAT and actual Operating Cash Flow, often driven by inventory buildup or uncollected receivables."
+            st.markdown(f"**Earnings Quality & Cash Realism:** {sloan_text}")
 
-        st.warning(f"**Macro Inversion:** A sharp rise in interest rates will penalize **{sa_name if A['D/E'] > B['D/E'] else sb_name}** more significantly due to their debt profile.")
+            # 5. Altman Z
+            alt_text = "Solvency analysis via the Altman Z-Score evaluates the balance sheet's ability to withstand stressed market environments. "
+            for c in comp_data:
+                alt_text += f"**{c['Company']}** is categorized in the **{c['Zone']} Zone** (Score: {c['Altman Z']:.2f}). "
+            alt_text += "Entities in the 'Safe' zone exhibit robust durability against bankruptcy, while those in 'Distress' or 'Grey' zones should be monitored for credit-side volatility and liquidity constraints."
+            st.markdown(f"**Solvency & Balance Sheet Durability:** {alt_text}")
+
+            # 6. Piotroski
+            pio_text = "Operational momentum is measured by the Piotroski F-Score, which evaluates year-over-year trending in profitability and liquidity. "
+            for c in comp_data:
+                status = "Exceptional momentum" if c['Piotroski'] >= 7 else "Average stability" if c['Piotroski'] >= 4 else "Declining fundamental strength"
+                pio_text += f"**{c['Company']}** scores {c['Piotroski']}/8, signaling {status}. "
+            pio_text += "High scores indicate that the business is improving its internal efficiencies and reducing financial risk simultaneously."
+            st.markdown(f"**Internal Operational Momentum:** {pio_text}")
+
+            # 7. Debt/Equity
+            debt_text = "The capital structure determines how these companies will navigate interest rate cycles. "
+            for c in comp_data:
+                risk = "highly conservative" if c['D/E'] < 0.3 else "moderately geared" if c['D/E'] < 1.0 else "aggressive financial leverage"
+                debt_text += f"**{c['Company']}** maintains a D/E of {c['D/E']:.2f}, representing a {risk} structure. "
+            debt_text += "In a rising interest rate environment, companies with low D/E ratios are best positioned to maintain net margins, while those with high leverage face increased pressure on earnings power."
+            st.markdown(f"**Capital Structure & Interest Rate Sensitivity:** {debt_text}")
+
+            # ─────────────────────────────────────────────────────────────────────
+            # 5. INDIVIDUAL PROS & CONS
+            # ─────────────────────────────────────────────────────────────────────
+            st.divider()
+            st.subheader("🚦 Individual Strategic Health-Check")
+            pc_cols = st.columns(len(comp_data))
+            for i, c in enumerate(comp_data):
+                with pc_cols[i]:
+                    st.markdown(f"#### {c['Company']}")
+                    # Pros
+                    st.markdown("**🟢 Strengths**")
+                    if c['Piotroski'] >= 7: st.write("- Elite operational momentum.")
+                    if c['Altman Z'] > 2.99: st.write("- Fortress balance sheet safety.")
+                    if c['D/E'] < 0.4: st.write("- Low financial gearing risk.")
+                    if c['OPM %'] > 20: st.write("- Dominant pricing power.")
+                    if abs(c['Sloan %']) < 5: st.write("- Highly conservative accounting.")
+                    
+                    # Cons
+                    st.markdown("**🔴 Drawbacks**")
+                    if c['PE'] > 60: st.write("- Stretched valuation; zero safety.")
+                    if c['D/E'] > 1.5: st.write("- Elevated interest rate sensitivity.")
+                    if c['Zone'] == "Distress": st.write("- Serious insolvency risk signals.")
+                    if c['OPM %'] < 10: st.write("- Thin margins; low cushion.")
+                    if c['Sloan %'] > 15: st.write("- High non-cash accrual risk.")
+
+            # ─────────────────────────────────────────────────────────────────────
+            # 6. ALLOCATION MATRIX
+            # ─────────────────────────────────────────────────────────────────────
+            st.divider()
+            st.subheader("⚖️ Scenario-Based Allocation Matrix")
+            m1, m2 = st.columns(2)
+            with m1:
+                st.markdown("#### 🛡️ Bear Market / Rate Hike Scenario")
+                safe_lead = sorted(comp_data, key=lambda x: (-x['Altman Z'], x['D/E']))[0]
+                st.write(f"In this environment, **{safe_lead['Company']}** is the preferred allocation. Its high Altman Z-Score and low D/E ratio provide the strongest defensive shield against credit contraction and rising borrowing costs.")
+            with m2:
+                st.markdown("#### 🚀 Bull Market / Growth Expansion Scenario")
+                momentum_lead = sorted(comp_data, key=lambda x: (-x['Piotroski'], x['PE']))[0]
+                st.write(f"In a high-growth environment, **{momentum_lead['Company']}** is positioned for maximum capture. Its superior Piotroski score reflects internal efficiency gains that typically translate into aggressive EPS expansion during market upswings.")
+
 else:
-    st.info("👋 Welcome. Upload Screener.in Excel files to begin analysis.")
+    st.info("👋 Welcome. Please upload Screener.in Excel files in the sidebar to generate the institutional deep-dive.")

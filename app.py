@@ -3,30 +3,55 @@ import pandas as pd
 import openpyxl
 import io
 import zipfile
+import re
 import plotly.express as px
 import plotly.graph_objects as go
-import traceback
+import traceback  # Required for enhanced debugging
 from datetime import datetime
 
-# 1. UI/UX THEME & CONFIG
-st.set_page_config(page_title="IERT Institutional Terminal", layout="wide", page_icon="💎")
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. UI/UX: INSTITUTIONAL CSS INJECTION
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Institutional Equity Terminal", layout="wide", page_icon="💎")
 
 def inject_custom_css():
     st.markdown("""
     <style>
-        :root { --bg-dark: #0e1117; --card-bg: #161b22; --border-color: #30363d; --emerald: #10b981; --rose: #f85149; }
-        .stApp { background-color: var(--bg-dark); color: #c9d1d9; }
-        div[data-testid="stMetric"] { background-color: var(--card-bg); border: 1px solid var(--border-color); padding: 15px; border-radius: 10px; }
-        .reportview-container .main { background: var(--bg-dark); }
+        :root {
+            --bg-dark: #0e1117;
+            --card-bg: #161b22;
+            --border-color: #30363d;
+            --text-main: #c9d1d9;
+            --accent-emerald: #10b981;
+        }
+        .stApp { background-color: var(--bg-dark); color: var(--text-main); }
+        div[data-testid="stMetric"] {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        h1, h2, h3 { color: #ffffff !important; font-family: 'Inter', sans-serif; }
+        .hero-subtitle { color: #8b949e; font-size: 1.1rem; margin-bottom: 2rem; }
         .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-        .stTabs [data-baseweb="tab"] { background-color: var(--card-bg); border: 1px solid var(--border-color); border-radius: 5px 5px 0 0; padding: 10px 20px; }
+        .stTabs [data-baseweb="tab"] {
+            background-color: var(--card-bg);
+            border-radius: 4px 4px 0px 0px;
+            padding: 10px 20px;
+            color: var(--text-main);
+        }
     </style>
     """, unsafe_allow_html=True)
+
 inject_custom_css()
 
-# 2. CORE MATHEMATICAL HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. QUANT ENGINE: SAFE MATH & HEURISTIC EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+
 def safe_float(val, default=0.0):
-    if val is None or val == "": return default
+    if val is None: return default
     try:
         if isinstance(val, (int, float)): return float(val)
         s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
@@ -40,158 +65,219 @@ def safe_div(n, d, default=0.0):
         return n_f / d_f if d_f != 0 else default
     except: return default
 
+def calculate_cagr(series, years):
+    if not series or len(series) < years + 1: return 0.0
+    try:
+        start_val = series[-(years + 1)]
+        end_val = series[-1]
+        if start_val <= 0 or end_val <= 0: return 0.0
+        return ((end_val / start_val) ** (1 / years) - 1) * 100
+    except: return 0.0
+
 def find_row_series(ws, keywords):
     kw_lower = [k.lower() for k in keywords]
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=2):
         label = f"{str(row[0].value or '')} {str(row[1].value or '')}".lower()
         if any(k in label for k in kw_lower):
             row_idx = row[0].row
-            # Collect columns from C onwards (Screener data starts at Col 3)
-            return [safe_float(ws.cell(row=row_idx, column=c).value, None) for c in range(3, ws.max_column + 1) if ws.cell(row=row_idx, column=c).value is not None]
+            return [safe_float(ws.cell(row=row_idx, column=c).value, None) 
+                    for c in range(2, ws.max_column + 1) 
+                    if ws.cell(row=row_idx, column=c).value is not None]
     return []
 
-# 3. THE ANALYTIC ENGINE
 def process_workbook(file_bytes, filename):
     try:
+        res = {} # Initialize cleanly
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
         ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), None)
-        if not ds_name: return None
+        if not ds_name: return None, None
         ws = wb[ds_name]
 
-        # Metadata
-        e_name = ws.cell(row=1, column=2).value
-        comp_name = str(e_name).strip() if e_name else str(filename).replace(".xlsx", "")
+        # Company Name Safeguard
+        extracted_name = ws.cell(row=1, column=2).value
+        res["Company"] = str(extracted_name).strip() if extracted_name else str(filename).replace(".xlsx", "")
 
-        # Expanded Keyword Map for Sector Diversity (Steel, Banks, IT)
-        m = {
+        data_map = {
             "mcap": ["Market Capitalization", "Market Cap"],
-            "sales": ["Sales", "Revenue", "Interest Earned"],
-            "op": ["Operating Profit", "EBITDA", "PBIT"],
-            "pat": ["Net Profit", "PAT", "Profit after tax"],
+            "sales": ["Sales", "Revenue"],
+            "op": ["Operating Profit", "EBITDA"],
+            "pat": ["Net Profit", "Profit after tax"],
             "pbt": ["Profit before tax", "PBT"],
-            "int": ["Interest", "Finance Costs"],
+            "interest": ["Interest", "Finance Costs"],
+            "depr": ["Depreciation"],
             "debt": ["Borrowings", "Total Debt"],
-            "eq": ["Equity Share Capital", "Share Capital"],
-            "res": ["Reserves", "Other Equity"],
+            "equity": ["Equity Share Capital", "Share Capital"],
+            "reserves": ["Reserves"],
             "cfo": ["Cash from Operating", "CFO"],
             "cfi": ["Cash from Investing", "CFI"],
+            "cwip": ["Capital Work in Progress", "CWIP"],
+            "net_block": ["Net Block", "Fixed Assets"],
+            "liab": ["Other Liabilities"],
             "assets": ["Total Assets"],
-            "liab": ["Other Liabilities", "Current Liabilities"],
-            "recv": ["Receivables", "Trade Receivables"],
-            "inv": ["Inventory", "Inventories"],
-            "cash": ["Cash & Bank", "Cash Equivalents"]
+            "receivables": ["Receivables", "Trade Receivables"],
+            "inventory": ["Inventory"]
         }
 
-        raw = {k: find_row_series(ws, v) for k, v in m.items()}
-        cur = {k: (raw[k][-1] if raw[k] else 0.0) for k in raw}
-        prev = {k: (raw[k][-2] if (raw[k] and len(raw[k]) > 1) else cur[k]) for k in raw}
+        # 1. Extraction
+        raw = {k: find_row_series(ws, v) for k, v in data_map.items()}
+        curr = {k: (raw[k][-1] if raw[k] else 0.0) for k in raw}
         
-        # Financial Structural Logic
-        eq_total = cur['eq'] + cur['res']
-        assets_total = cur['assets'] if cur['assets'] > 0 else (eq_total + cur['debt'] + cur['liab'])
+        # 2. Intermediate Variables (Isolated from Dictionary)
+        local_equity = curr['equity'] + curr['reserves']
+        local_debt = curr['debt']
+        local_assets = curr['assets'] if curr['assets'] else (local_equity + local_debt + curr['liab'])
+        local_pat = curr['pat']
+        local_cfo = curr['cfo']
+        local_sales = curr['sales']
+        local_mcap = curr['mcap']
         
-        final = {"Company": comp_name}
-        final["Market Cap"] = cur['mcap']
-        final["PE"] = safe_div(cur['mcap'], cur['pat'])
-        final["D/E"] = safe_div(cur['debt'], eq_total)
-        final["ROCE %"] = safe_div(cur['pbt'] + cur['int'], eq_total + cur['debt']) * 100
-        final["OPM %"] = safe_div(cur['op'], cur['sales']) * 100
-        final["Sloan %"] = safe_div(cur['pat'] - cur['cfo'], assets_total) * 100
-        final["FCF"] = cur['cfo'] - abs(cur['cfi'])
-        final["Int. Coverage"] = safe_div(cur['pbt'] + cur['int'], cur['int'], default=99.0)
+        # 3. Calculations
+        res["Market Cap"] = local_mcap
+        res["Sales"] = local_sales
+        res["Net Profit"] = local_pat
+        res["OPM %"] = safe_div(curr['op'], local_sales) * 100
+        res["PE"] = safe_div(local_mcap, local_pat)
+        res["D/E"] = safe_div(local_debt, local_equity)
+        res["ROCE %"] = safe_div(curr['pbt'] + curr['interest'], local_equity + local_debt) * 100
+        res["Interest Coverage"] = safe_div(curr['pbt'] + curr['interest'], curr['interest'], default=999.0)
+        res["FCF"] = local_cfo - abs(curr['cfi'])
+        res["FCF Yield %"] = safe_div(res["FCF"], local_mcap) * 100
+        res["CWIP to Net Block %"] = safe_div(curr['cwip'], curr['net_block']) * 100
+        res["3Yr Sales CAGR %"] = calculate_cagr(raw['sales'], 3)
+        res["3Yr PAT CAGR %"] = calculate_cagr(raw['pat'], 3)
+        res["Sloan %"] = safe_div(local_pat - local_cfo, local_assets) * 100
+        
+        # 4. Altman Z-Score Calculation (Isolated)
+        wc_proxy = (curr['receivables'] + curr['inventory'] + (local_assets * 0.05)) - curr['liab']
+        z_val = (
+            (1.2 * safe_div(wc_proxy, local_assets)) + 
+            (1.4 * safe_div(curr['reserves'], local_assets)) + 
+            (3.3 * safe_div(curr['op'], local_assets)) + 
+            (0.6 * safe_div(local_mcap, local_debt + curr['liab'])) + 
+            (0.99 * safe_div(local_sales, local_assets))
+        )
+        res["Altman Z"] = z_val
+        res["Zone"] = "Safe" if z_val > 2.99 else "Grey" if z_val >= 1.81 else "Distress"
+        
+        # 5. Piotroski Score Calculation (Isolated)
+        p_score = 0
+        if local_pat > 0: p_score += 1
+        if local_cfo > 0: p_score += 1
+        if local_cfo > local_pat: p_score += 1
+        if res["3Yr PAT CAGR %"] > 0: p_score += 1
+        
+        # Leverage condition (Compare curr D/E vs Prev D/E)
+        if len(raw['debt']) > 1 and len(raw['equity']) > 1 and len(raw['reserves']) > 1:
+            prev_eq = raw['equity'][-2] + raw['reserves'][-2]
+            prev_de = safe_div(raw['debt'][-2], prev_eq)
+            if res["D/E"] < prev_de: p_score += 1
+            
+        if res["ROCE %"] > 15: p_score += 1
+        if res["3Yr Sales CAGR %"] > 0: p_score += 1
+        if local_assets > 0: p_score += 1
+        res["Piotroski"] = p_score
 
-        # Altman Z-Score Calculation (Industrial Model)
-        wc = (cur['recv'] + cur['inv'] + cur['cash']) - cur['liab']
-        z = (1.2 * safe_div(wc, assets_total)) + \
-            (1.4 * safe_div(cur['res'], assets_total)) + \
-            (3.3 * safe_div(cur['op'], assets_total)) + \
-            (0.6 * safe_div(cur['mcap'], cur['debt'] + cur['liab'])) + \
-            (1.0 * safe_div(cur['sales'], assets_total))
-        final["Altman Z"] = round(z, 2)
-        final["Zone"] = "Safe" if z > 2.99 else "Grey" if z >= 1.81 else "Distress"
+        return res, file_bytes
 
-        # Piotroski F-Score (8-point adaptation)
-        f = 0
-        if cur['pat'] > 0: f += 1 # Profitability
-        if cur['cfo'] > 0: f += 1 # Cash flow
-        if cur['cfo'] > cur['pat']: f += 1 # Accrual quality
-        if safe_div(cur['pat'], assets_total) > safe_div(prev['pat'], assets_total): f += 1 # ROA Improving
-        if cur['debt'] <= prev['debt']: f += 1 # Leverage
-        if cur['sales'] > prev['sales']: f += 1 # Growth
-        if cur['op'] > prev['op']: f += 1 # Efficiency
-        if safe_div(cur['op'], cur['sales']) > safe_div(prev['op'], prev['sales']): f += 1 # Margin
-        final["Piotroski"] = f
+    except Exception as e:
+        # Enhanced Debugging with Traceback
+        err_msg = f"Error in {filename}: {str(e)}\n{traceback.format_exc()}"
+        st.error(err_msg)
+        return None, None
 
-        return final
-    except Exception:
-        st.error(f"Error processing {filename}: {traceback.format_exc()}")
-        return None
-
-# 4. APP INTERFACE
-st.title("🏛️ Institutional Research Terminal")
-st.markdown("<p style='color:#8b949e; font-size:1.1rem;'>Zero-Crash Quantitative Analysis Engine v2.6</p>", unsafe_allow_html=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. UI LAYOUT
+# ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("📂 Data Ingestion")
-    uploaded_files = st.file_uploader("Upload Screener Excels", type="xlsx", accept_multiple_files=True)
+    st.header("📂 Batch Ingestion")
+    uploads = st.file_uploader("Upload Screener Excels", type="xlsx", accept_multiple_files=True)
     st.divider()
-    st.info("💡 Pro Tip: Upload both Bank and Industrial files. The engine detects 'Interest Earned' vs 'Sales' automatically.")
+    st.caption(f"Terminal v2.6 | {datetime.now().year}")
 
-if uploaded_files:
-    processed_results = []
-    for f in uploaded_files:
-        res = process_workbook(f.getvalue(), f.name)
-        if res: processed_results.append(res)
+st.title("🏛️ Institutional Research Terminal")
+st.markdown("<p class='hero-subtitle'>Dynamic Quantitative Auditor</p>", unsafe_allow_html=True)
 
-    if processed_results:
-        df = pd.DataFrame(processed_results)
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Matrix Analysis", "📈 Risk Visuals", "🚨 Audit Trail", "📄 Export"])
+if uploads:
+    results = []
+    raw_files = []
+    for up in uploads:
+        data, b_content = process_workbook(up.getvalue(), up.name)
+        if data:
+            results.append(data)
+            raw_files.append((up.name, b_content))
+
+    if results:
+        df = pd.DataFrame(results)
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Matrix", "🕵️ Deep-Dive", "📈 Visuals", "🚨 Audit", "📄 Export"])
 
         with tab1:
-            st.subheader("Fundamental Master-Matrix")
-            styled_df = df.style.format({
-                "Market Cap": "₹{:,.0f}Cr", "PE": "{:.1f}x", "D/E": "{:.2f}", 
-                "ROCE %": "{:.1f}%", "OPM %": "{:.1f}%", "Altman Z": "{:.2f}", "Sloan %": "{:.1f}%"
-            }).background_gradient(subset=["Piotroski"], cmap="RdYlGn", vmin=0, vmax=8)
-            st.dataframe(styled_df, use_container_width=True, height=400)
+            st.subheader("Institutional Comparison Grid")
+            st.dataframe(df.style.format({
+                "Market Cap": "₹{:,.0f}Cr", "Sales": "₹{:,.0f}Cr", "Net Profit": "₹{:,.0f}Cr",
+                "ROCE %": "{:.1f}%", "PE": "{:.1f}x", "D/E": "{:.2f}", "3Yr Sales CAGR %": "{:.1f}%",
+                "FCF Yield %": "{:.1f}%", "Altman Z": "{:.2f}", "Interest Coverage": "{:.1f}x"
+            }).background_gradient(subset=["Piotroski"], cmap="RdYlGn"))
 
         with tab2:
-            st.subheader("Quality vs. Valuation Map")
-            fig = px.scatter(df, x="PE", y="ROCE %", size="Market Cap", color="Zone",
-                             hover_name="Company", text="Company",
-                             color_discrete_map={"Safe": "#10b981", "Grey": "#f59e0b", "Distress": "#ef4444"},
-                             title="Bubble Size = Market Cap | Color = Solvency Zone")
-            fig.update_layout(template="plotly_dark", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-            st.plotly_chart(fig, use_container_width=True)
+            selection = st.multiselect("Select for Narrative Analysis:", df["Company"].unique(), default=df["Company"].unique()[:min(3, len(df))])
+            if selection:
+                subset = df[df["Company"].isin(selection)]
+                for _, row in subset.iterrows():
+                    with st.expander(f"Strategic Narrative: {row['Company']}", expanded=True):
+                        c1, c2 = st.columns([1, 2])
+                        c1.metric("Piotroski", f"{row['Piotroski']}/8")
+                        c1.metric("ROCE", f"{row['ROCE %']:.1f}%")
+                        c2.markdown(f"**Equity View:** {row['Company']} trades at {row['PE']:.1f}x PE with a FCF Yield of {row['FCF Yield %']:.1f}%. "
+                                    f"Current leverage (D/E) is {row['D/E']:.2f}. "
+                                    f"Health zone is currently classified as **{row['Zone']}**.")
 
         with tab3:
-            cols = st.columns(2)
-            for i, row in df.iterrows():
-                with cols[i % 2].expander(f"Audit: {row['Company']}", expanded=True):
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("F-Score", f"{row['Piotroski']}/8")
-                    c2.metric("Solvency", row['Zone'])
-                    c3.metric("Accruals", f"{row['Sloan %']:.1f}%")
-                    
-                    if row['Piotroski'] >= 6: st.success("✅ Strong Operational Momentum")
-                    if row['Sloan %'] > 10: st.warning("⚠️ High Accruals: Check Earnings Purity")
-                    if row['D/E'] > 1.5: st.error("❌ High Leverage Risk")
+            c1, c2 = st.columns(2)
+            with c1:
+                fig1 = px.scatter(df, x="PE", y="OPM %", size="Market Cap", color="Zone",
+                                 hover_name="Company", title="PE vs. Operating Margin",
+                                 color_discrete_map={"Safe": "#10b981", "Grey": "#fbbf24", "Distress": "#ef4444"})
+                st.plotly_chart(fig1, use_container_width=True)
+            with c2:
+                fig2 = go.Figure(data=[
+                    go.Bar(name='Piotroski', x=df['Company'], y=df['Piotroski'], marker_color='#10b981'),
+                    go.Bar(name='Altman Z', x=df['Company'], y=df['Altman Z'], marker_color='#3b82f6')
+                ])
+                fig2.update_layout(title="Quality vs. Solvency", barmode='group', template="plotly_dark")
+                st.plotly_chart(fig2, use_container_width=True)
 
         with tab4:
-            st.subheader("Generate Terminal Report")
-            csv = df.to_csv(index=False).encode('utf-8')
+            st.subheader("🚨 Automated Risk Auditor")
+            for _, row in df.iterrows():
+                st.write(f"### {row['Company']}")
+                cols = st.columns(4)
+                if row['Net Profit'] > 0 and row['FCF'] < 0:
+                    cols[0].error("⚠️ Cash Conversion\nNegative FCF despite PAT.")
+                else: cols[0].success("✅ Cash Flow OK")
+
+                if row['D/E'] > 1.2 and row['Interest Coverage'] < 2.5:
+                    cols[1].error("⚠️ Solvency Risk\nHigh Debt / Low Coverage.")
+                else: cols[1].success("✅ Solvency OK")
+
+                if row['Sloan %'] > 10:
+                    cols[2].warning("⚠️ Accrual Risk\nSloan Ratio > 10%.")
+                else: cols[2].success("✅ Accruals OK")
+
+                if row['CWIP to Net Block %'] > 40:
+                    cols[3].warning("⚠️ Execution Risk\nExtreme CWIP Level.")
+                else: cols[3].success("✅ Asset Health OK")
+                st.divider()
+
+        with tab5:
+            report = "# Institutional Summary Report\n\n"
+            for _, row in df.iterrows():
+                report += f"## {row['Company']}\n- Score: {row['Piotroski']}/8 | Health: {row['Zone']}\n- ROCE: {row['ROCE %']:.1f}% | PE: {row['PE']:.1f}x\n\n"
+            st.download_button("📥 Download Report (.md)", data=report, file_name="Terminal_Report.md")
             
-            # Create ZIP in memory
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                zip_file.writestr("Analysis_Summary.csv", csv)
-            
-            st.download_button(
-                label="📥 Download Research Bundle (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name=f"Research_Bundle_{datetime.now().strftime('%Y%m%d')}.zip",
-                mime="application/zip"
-            )
+            zip_io = io.BytesIO()
+            with zipfile.ZipFile(zip_io, 'w') as zf:
+                for fname, content in raw_files: zf.writestr(f"Processed_{fname}", content)
+            st.download_button("📥 Download ZIP Package", data=zip_io.getvalue(), file_name="Research_Batch.zip")
 else:
-    st.info("👋 System Ready. Please upload Screener.in Excel files to initialize analysis.")
+    st.info("👋 Upload Screener.in Excel exports to begin analysis.")

@@ -329,6 +329,17 @@ def process_workbook(file_bytes, filename):
         st.error(err_msg)
         return None, None
 
+def dataframe_to_markdown_table(df_sub):
+    """Clean markdown table generator independent of tabulate package."""
+    headers = list(df_sub.columns)
+    header_row = "| " + " | ".join(headers) + " |"
+    sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
+    data_rows = []
+    for _, row in df_sub.iterrows():
+        r_str = [str(val) for val in row.values]
+        data_rows.append("| " + " | ".join(r_str) + " |")
+    return "\n".join([header_row, sep_row] + data_rows)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. UI & CONTROL FLOW
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,7 +470,6 @@ if uploads:
             
             c1, c2 = st.columns(2)
             
-            # User Request: Scatter plot axes bounds clipping extreme P/E > 200x or negative P/Es
             with c1:
                 scatter_df = df.copy()
                 scatter_df["Plot_PE"] = scatter_df["PE"].apply(lambda x: min(x, max_pe_bound) if x > 0 else 0)
@@ -498,7 +508,6 @@ if uploads:
                 st.caption("ℹ️ Note: P/E axis is bounded between -5x and user-defined limit to prevent extreme valuation outliers from compressing the visual.")
 
             with c2:
-                # Grouped Bar Chart for Quality vs Solvency
                 bar_companies = selection if selection else df['Company'].tolist()
                 bar_df = df[df['Company'].isin(bar_companies)]
                 
@@ -584,7 +593,7 @@ if uploads:
             report += "=" * 80 + "\n\n"
             
             report += "## 1. COHORT SUMMARY GRID\n\n"
-            report += df[["Company", "Sector_Type", "Market Cap", "PE", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]].to_markdown(index=False)
+            report += dataframe_to_markdown_table(df[["Company", "Sector_Type", "Market Cap", "PE", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]])
             report += "\n\n" + "=" * 80 + "\n\n"
             
             report += "## 2. STRATEGIC COMPANY NARRATIVES\n\n"

@@ -47,7 +47,7 @@ def inject_custom_css():
             transform: translateY(-2px);
         }
         
-        h1, h2, h3 { 
+        h1, h2, h3, h4 { 
             color: var(--text-heading) !important; 
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
             font-weight: 700;
@@ -93,6 +93,27 @@ def inject_custom_css():
             font-weight: 600;
             border: 1px solid #0284c7;
         }
+        .thesis-card {
+            background-color: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+        }
+        .trigger-box-buy {
+            background-color: rgba(16, 185, 129, 0.08);
+            border-left: 4px solid #10b981;
+            padding: 12px 16px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .trigger-box-sell {
+            background-color: rgba(239, 68, 68, 0.08);
+            border-left: 4px solid #ef4444;
+            padding: 12px 16px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -137,10 +158,6 @@ def calculate_cagr(series, years):
         return 0.0
 
 def find_row_series(ws, keywords):
-    """
-    Searches for keywords in sheet rows and returns time-series list.
-    Returns None if no matching row is found (distinguishing missing from zero).
-    """
     kw_lower = [k.lower() for k in keywords]
     for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=3):
         label = f"{str(row[0].value or '')} {str(row[1].value or '')} {str(row[2].value or '')}".lower()
@@ -156,18 +173,12 @@ def find_row_series(ws, keywords):
     return None
 
 def detect_financial_entity(ws, filename, extracted_name, raw_data):
-    """
-    Robust Financial Sector Detection:
-    - Scans workbook content, sheet titles, and company names for explicit Banking/NBFC indicators.
-    - Avoids inferring financial status solely from zero OP or zero Inventory.
-    """
     fin_keywords = [
         "bank", "nbfc", "advances", "deposits", "interest earned", "interest expended", 
         "net interest income", "nii", "provisions & contingencies", "gross npa", 
         "net npa", "capital adequacy", "housing finance", "microfinance"
     ]
     
-    # 1. Text scan in Workbook headers/labels
     ws_text_sample = ""
     for r in range(1, min(40, ws.max_row + 1)):
         for c in range(1, min(4, ws.max_column + 1)):
@@ -178,7 +189,6 @@ def detect_financial_entity(ws, filename, extracted_name, raw_data):
     if any(kw in ws_text_sample for kw in fin_keywords):
         return True
 
-    # 2. Check Name Suffixes / Specific Keywords
     combined_name = f"{extracted_name} {filename}".lower()
     name_fin_terms = ["bank", "finance", "fin", "nbfc", "capital", "housing fin", "lending"]
     if any(term in combined_name for term in name_fin_terms):
@@ -193,7 +203,6 @@ def process_workbook(file_bytes, filename):
         ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), wb.sheetnames[0])
         ws = wb[ds_name]
 
-        # Extract Company Name
         extracted_name = ws.cell(row=1, column=2).value
         company_name = str(extracted_name).strip() if extracted_name else str(filename).replace(".xlsx", "").replace(".xls", "")
         res["Company"] = company_name
@@ -220,16 +229,13 @@ def process_workbook(file_bytes, filename):
             "inventory": ["Inventory", "Inventories"]
         }
 
-        # 1. Extraction (Returns None for missing metrics, preserving zero as genuine numeric 0)
         raw = {k: find_row_series(ws, v) for k, v in data_map.items()}
         curr = {k: (raw[k][-1] if raw[k] and raw[k][-1] is not None else 0.0) for k in raw}
         
-        # 2. Sector Adaptability Check
         is_fin = detect_financial_entity(ws, filename, company_name, raw)
         res["Is_Financial"] = is_fin
         res["Sector_Type"] = "Financial / Banking" if is_fin else "Industrial / Commercial"
 
-        # 3. Intermediate Capital Variables
         local_equity = curr['equity'] + curr['reserves']
         local_debt = curr['debt']
         local_assets = curr['assets'] if curr['assets'] > 0 else (local_equity + local_debt + curr['liab'])
@@ -239,7 +245,6 @@ def process_workbook(file_bytes, filename):
         local_sales = curr['sales']
         local_mcap = curr['mcap']
         
-        # CapEx & FCF Extraction with Fallback
         raw_capex = curr['capex']
         if raw_capex > 0:
             capex_val = raw_capex
@@ -253,25 +258,21 @@ def process_workbook(file_bytes, filename):
         res["FCF"] = fcf_val
         res["FCF Yield %"] = safe_div(fcf_val, local_mcap) * 100
 
-        # 4. EBIT & Interest Coverage Calculations
-        # User Request: Non-financials EBIT = PBT + Interest; Financials EBIT = PBT or Net Profit directly!
         if is_fin:
             local_ebit = local_pbt if local_pbt != 0 else local_pat
-            res["Interest Coverage"] = None  # Interest is operating cost for banks
+            res["Interest Coverage"] = None
         else:
             local_ebit = (curr['pbt'] + curr['interest']) if (curr['pbt'] != 0 or curr['interest'] != 0) else curr['op']
             res["Interest Coverage"] = safe_div(local_ebit, curr['interest'], default=999.0) if curr['interest'] > 0 else 999.0
 
-        # 5. Core Performance Metrics
         res["Market Cap"] = local_mcap
         res["Sales"] = local_sales
         res["Net Profit"] = local_pat
         res["PE"] = safe_div(local_mcap, local_pat) if local_pat > 0 else -1.0
         res["D/E"] = safe_div(local_debt, local_equity)
         
-        # Profitability Margins & Returns
         if is_fin:
-            res["OPM %"] = safe_div(local_pat, local_sales) * 100  # Net margin proxy for banks
+            res["OPM %"] = safe_div(local_pat, local_sales) * 100
             res["ROE %"] = safe_div(local_pat, local_equity) * 100
             res["ROCE %"] = safe_div(local_ebit, local_equity + local_debt) * 100
         else:
@@ -283,13 +284,11 @@ def process_workbook(file_bytes, filename):
         res["3Yr Sales CAGR %"] = calculate_cagr(raw['sales'], 3)
         res["3Yr PAT CAGR %"] = calculate_cagr(raw['pat'], 3)
         
-        # 6. Sloan Accrual Ratio
         if is_fin:
-            res["Sloan %"] = None  # Accrual ratio formula is non-standard for banks
+            res["Sloan %"] = None
         else:
             res["Sloan %"] = safe_div(local_pat - local_cfo, local_assets) * 100
 
-        # 7. Altman Z-Score Calculation (Isolated for Industrial vs. Banking)
         if is_fin:
             res["Altman Z"] = None
             res["Zone"] = "N/A (Financial)"
@@ -305,7 +304,6 @@ def process_workbook(file_bytes, filename):
             res["Altman Z"] = z_val
             res["Zone"] = "Safe" if z_val > 2.99 else "Grey" if z_val >= 1.81 else "Distress"
 
-        # 8. Piotroski Score Calculation
         p_score = 0
         if local_pat > 0: p_score += 1
         if local_cfo > 0: p_score += 1
@@ -330,7 +328,6 @@ def process_workbook(file_bytes, filename):
         return None, None
 
 def dataframe_to_markdown_table(df_sub):
-    """Clean markdown table generator independent of tabulate package."""
     headers = list(df_sub.columns)
     header_row = "| " + " | ".join(headers) + " |"
     sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
@@ -341,7 +338,172 @@ def dataframe_to_markdown_table(df_sub):
     return "\n".join([header_row, sep_row] + data_rows)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. UI & CONTROL FLOW
+# 3. QUALITATIVE GENERATION ENGINE: EXPLICIT METRIC DEEP DIVES & THESES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_explicit_metric_breakdown(row):
+    """Generates rigorous metric-by-metric institutional breakdown paragraphs for a stock."""
+    is_fin = row["Is_Financial"]
+    comp = row["Company"]
+    
+    # 1. Valuation & Pricing
+    pe = row["PE"]
+    if pe > 0:
+        if pe < 15:
+            pe_eval = f"at a deep value / depressed multiple of {pe:.1f}x P/E, offering potential valuation re-rating if operational momentum sustains."
+        elif pe <= 35:
+            pe_eval = f"at a fair market valuation multiple of {pe:.1f}x P/E, pricing in baseline compound growth without excessive speculative premium."
+        else:
+            pe_eval = f"at a premium growth multiple of {pe:.1f}x P/E, requiring execution excellence and continuous high earnings growth to prevent multiple contraction."
+    else:
+        pe_eval = "with a negative P/E multiple due to reported trailing net losses, making classical earnings-based valuation non-applicable and requiring asset-based or cash flow recovery analysis."
+    
+    val_text = f"**1. Valuation Multiple (P/E Ratio):** {comp} is currently priced {pe_eval} From an institutional standpoint, trailing earnings valuation reflects market expectations regarding growth durability. Industry benchmarks vary widely between asset-light high-margin businesses (where 30-40x P/E can be justified) and cyclical commodity producers (where single-digit P/E is standard)."
+
+    # 2. Capital Efficiency & Returns (ROE & ROCE)
+    roe = row["ROE %"]
+    roce = row["ROCE %"]
+    if roe > 18:
+        roe_eval = f"demonstrates outstanding equity compounding power with an ROE of {roe:.1f}%, exceeding cost of equity thresholds by a wide margin."
+    elif roe >= 10:
+        roe_eval = f"delivers moderate equity capital returns with an ROE of {roe:.1f}%, indicating steady reinvestment yield."
+    else:
+        roe_eval = f"exhibits sub-par equity capital return of {roe:.1f}%, signalling potential capital misallocation or cyclically suppressed profits."
+
+    roce_eval = f"ROCE stands at {roce:.1f}%." + (" For industrial firms, a ROCE above 15% signifies strong economic moats and pricing power over capital providers." if not is_fin else " For financial entities, return on total funds employed reflects spread management efficiency.")
+    
+    cap_text = f"**2. Capital Efficiency & Compound Returns (ROE & ROCE):** {comp} {roe_eval} Simultaneously, {roce_eval} Institutional investors closely monitor the spread between ROCE and the weighted average cost of capital (WACC); a wide positive spread confirms value creation."
+
+    # 3. Profitability & Operating Margins
+    opm = row["OPM %"]
+    if is_fin:
+        margin_label = "Net Margin (PAT / Income)"
+        margin_eval = f"stands at {opm:.1f}%. In banking and credit underwriting, net income margin captures asset quality, credit cost management, and net interest spread efficiency."
+    else:
+        margin_label = "Operating Profit Margin (OPM)"
+        if opm > 20:
+            margin_eval = f"expands to a robust {opm:.1f}%, reflecting premium product positioning, cost leadership, or high value-addition capabilities."
+        elif opm >= 10:
+            margin_eval = f"sits at {opm:.1f}%, aligned with competitive commercial operating norms but susceptible to raw material cost inflation."
+        else:
+            margin_eval = f"is constrained at {opm:.1f}%, highlighting thin operating buffers and heightened sensitivity to input price fluctuations."
+
+    prof_text = f"**3. Operational Profitability ({margin_label}):** The current margin profile {margin_eval} Sustaining or expanding margins during macro inflationary cycles is a primary qualitative indicator of structural pricing power."
+
+    # 4. Solvency, Leverage & Coverage
+    de = row["D/E"]
+    ic = row["Interest Coverage"]
+    alt_z = row["Altman Z"]
+    zone = row["Zone"]
+    
+    if is_fin:
+        solv_eval = f"Financial leverage (D/E) is measured at {de:.2f}x. High leverage is standard for deposit-taking entities where financial liabilities represent funding capital. Solvency is classified under banking regulatory frameworks rather than manufacturing Z-scores."
+    else:
+        ic_str = f"{ic:.1f}x" if isinstance(ic, (int, float)) and ic < 990 else "Debt Free"
+        z_str = f"{alt_z:.2f}" if alt_z is not None else "N/A"
+        solv_eval = f"Debt-to-Equity leverage stands at {de:.2f}x with an Interest Coverage Ratio of {ic_str}. The combined balance sheet solvency is evaluated via an Altman Z-Score of {z_str}, placing the enterprise in the **{zone}** health classification zone. A Z-Score above 2.99 confirms negligible short-to-medium term bankruptcy vulnerability."
+
+    solv_text = f"**4. Solvency, Debt Structure & Balance Sheet Coverage:** {solv_eval}"
+
+    # 5. Earnings Quality & Sloan Accrual Ratio
+    sloan = row["Sloan %"]
+    if is_fin or sloan is None:
+        sloan_text = f"**5. Earnings Quality & Sloan Accrual Ratio:** Sloan Accrual Ratio is N/A for financial institutions due to specialized loan-loss provision accounting and credit cash flow timing."
+    else:
+        if sloan > 10.0:
+            sloan_eval = f"stands elevated at {sloan:.1f}% (>10.0% threshold), raising red flags regarding aggressive revenue recognition, uncollected receivables, or non-cash inventory build-up."
+        elif sloan < -10.0:
+            sloan_eval = f"is deeply negative at {sloan:.1f}%, indicating highly conservative accounting with operating cash flow substantially exceeding reported net profit."
+        else:
+            sloan_eval = f"sits in the pristine neutral zone at {sloan:.1f}%, confirming that reported earnings are backed by actual cash receipts."
+        sloan_text = f"**5. Earnings Quality & Accrual Accounting (Sloan Ratio):** The Sloan Accrual Ratio for {comp} {sloan_eval}"
+
+    # 6. Cash Conversion & FCF Yield
+    fcf = row["FCF"]
+    fcf_y = row["FCF Yield %"]
+    fcf_text = f"**6. Cash Flow Generation & Free Cash Flow Yield:** The enterprise generated absolute Free Cash Flow (FCF = CFO - CapEx) of ₹{fcf:,.0f} Cr, translating into an FCF Yield of {fcf_y:.1f}% relative to market capitalization. FCF yield represents the unencumbered cash available for dividend distribution, debt paydown, or strategic bolt-on acquisitions."
+
+    # 7. Piotroski F-Score
+    p_score = row["Piotroski"]
+    if p_score >= 6:
+        p_eval = f"achieves an excellent score of {p_score}/8, signaling strong fundamental momentum, improving asset turn, and operational efficiency."
+    elif p_score >= 4:
+        p_eval = f"scores a moderate {p_score}/8, reflecting acceptable baseline health with minor operational areas requiring monitoring."
+    else:
+        p_eval = f"scores a weak {p_score}/8, pointing to structural operational friction, deteriorating leverage, or margin pressures."
+        
+    piot_text = f"**7. Piotroski Fundamental Quality Score:** {comp} {p_eval}"
+
+    return "\n\n".join([val_text, cap_text, prof_text, solv_text, sloan_text, fcf_text, piot_text])
+
+def generate_comprehensive_investment_thesis(row):
+    """Generates Bull Thesis, Bear Thesis, Event Triggers, and Pros/Cons."""
+    comp = row["Company"]
+    is_fin = row["Is_Financial"]
+    roe = row["ROE %"]
+    roce = row["ROCE %"]
+    pe = row["PE"]
+    de = row["D/E"]
+    opm = row["OPM %"]
+    sloan = row["Sloan %"]
+    fcf_y = row["FCF Yield %"]
+    p_score = row["Piotroski"]
+    zone = row["Zone"]
+
+    # Bull Thesis
+    bull = f"### 🐂 The Bull Thesis (Growth Drivers & Moats)\n"
+    bull += f"1. **Capital Allocation Efficiency:** {comp} demonstrates strong compounding efficiency with an ROE of **{roe:.1f}%** and ROCE of **{roce:.1f}%**, generating attractive returns on incremental reinvested capital.\n"
+    bull += f"2. **Operational Cash Generation:** The company delivers an FCF Yield of **{fcf_y:.1f}%**, proving that earnings are translating into actual liquid cash reserves rather than remaining trapped on the balance sheet.\n"
+    bull += f"3. **Fundamental Health Momentum:** Backed by a Piotroski F-Score of **{p_score}/8**, operational trends across leverage, margin expansion, and asset turnover remain healthy."
+
+    # Bear Thesis
+    bear = f"### 🐻 The Bear Thesis (Key Risks & Vulnerabilities)\n"
+    bear += f"1. **Valuation & Multiple Contraction Risk:** Trading at a P/E of **{pe:.1f}x**, any growth deceleration or margin compression could trigger a sharp derating in valuation multiples.\n"
+    if not is_fin and sloan is not None and sloan > 10.0:
+        bear += f"2. **Accrual & Earnings Quality Red Flag:** Sloan Accrual Ratio is elevated at **{sloan:.1f}%**, indicating a potential disconnect between accounting PAT and cash flows.\n"
+    else:
+        bear += f"2. **Leverage & Refinancing Exposure:** Debt-to-Equity stands at **{de:.2f}x**; sustained macro interest rate volatility could elevate interest burdens.\n"
+    bear += f"3. **Solvency & Macro Headwinds:** Solvency is categorized as **{zone}**, making macro demand shocks or raw material price inflation critical monitoring factors."
+
+    # Event-Driven Triggers
+    buy_trig = f"**🟢 Buy / Accumulate Triggers:**\n"
+    buy_trig += f"- Debt-to-Equity ratio reducing below 0.3x or Interest Coverage expanding > 5.0x.\n"
+    buy_trig += f"- Operating Margin (OPM) expanding by > 150 bps YoY due to operating leverage.\n"
+    buy_trig += f"- Sloan Accrual Ratio dropping below 5.0% alongside positive Free Cash Flow growth.\n"
+    buy_trig += f"- Major capital expenditure (CWIP) commissioning leading to revenue acceleration."
+
+    sell_trig = f"**🔴 Avoid / Liquidation Triggers:**\n"
+    sell_trig += f"- Piotroski F-Score deteriorating below 4/8 or Altman Z-Score dropping into Distress (<1.81).\n"
+    sell_trig += f"- Uncollected receivables spike exceeding sales growth or CFO/PAT disconnect widening for 2 consecutive quarters.\n"
+    sell_trig += f"- Margin contraction > 200 bps YoY driven by loss of pricing power."
+
+    triggers = f"### ⚡ Event-Driven Catalyst & Trigger Framework\n{buy_trig}\n\n{sell_trig}"
+
+    # Pros & Cons List
+    pros = [
+        f"Delivers ROE of {roe:.1f}% and ROCE of {roce:.1f}%.",
+        f"Generates Free Cash Flow Yield of {fcf_y:.1f}%.",
+        f"Piotroski Quality Score of {p_score}/8 confirms healthy fundamental momentum.",
+        f"Revenue 3-Yr CAGR of {row['3Yr Sales CAGR %']:.1f}% demonstrating growth resilience."
+    ]
+    
+    cons = [
+        f"P/E valuation multiple stands at {pe:.1f}x.",
+        f"Debt-to-Equity leverage measured at {de:.2f}x.",
+        f"Solvency zone classified as {zone}.",
+    ]
+    if not is_fin and sloan is not None and sloan > 10.0:
+        cons.append(f"Elevated Sloan Accrual Ratio of {sloan:.1f}% indicates accounting accrual risk.")
+
+    pros_str = "\n".join([f"- ✅ {p}" for p in pros])
+    cons_str = "\n".join([f"- ⚠️ {c}" for c in cons])
+
+    pros_cons = f"### ⚖️ Granular Pros & Cons Matrix\n**Strengths & Moats:**\n{pros_str}\n\n**Vulnerabilities & Risks:**\n{cons_str}"
+
+    return "\n\n".join([bull, bear, triggers, pros_cons])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. UI & CONTROL FLOW
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -352,7 +514,7 @@ with st.sidebar:
     max_pe_bound = st.slider("Scatter Plot Max P/E Axis Limit", min_value=50, max_value=300, value=150, step=25, 
                              help="Clips scatter plot x-axis upper bound to prevent valuation outliers from compressing the chart.")
     st.divider()
-    st.caption(f"Institutional Terminal v3.0 | {datetime.now().year}")
+    st.caption(f"Institutional Terminal v3.5 | {datetime.now().year}")
 
 st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
 st.markdown("<p class='hero-subtitle'>Dynamic Quantitative Auditor & Multi-Asset Valuation Architecture</p>", unsafe_allow_html=True)
@@ -369,7 +531,10 @@ if uploads:
     if results:
         df = pd.DataFrame(results)
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Matrix", "🕵️ Deep-Dive", "📈 Visuals", "🚨 Risk Audit", "📄 Export Report"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "📊 Matrix", "🕵️ Deep-Dive", "🏛️ Thesis & Allocation", 
+            "📈 Visuals", "🚨 Risk Audit", "📄 Export Report"
+        ])
 
         # ─────────────────────────────────────────────────────────────────────────
         # TAB 1: MASTER QUANTITATIVE MATRIX
@@ -399,21 +564,18 @@ if uploads:
             )
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 2: STRATEGIC DEEP-DIVE & KPI CARDS
+        # TAB 2: EXPLICIT METRIC-BY-METRIC DEEP DIVE
         # ─────────────────────────────────────────────────────────────────────────
         with tab2:
-            st.subheader("Strategic Cohort Leaders & Qualitative Deep-Dive")
+            st.subheader("Explicit Metric-by-Metric Deep Dive")
             
-            # KPI Cards Row
             kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
             
-            # 1. Highest ROE Leader
             valid_roe_df = df.dropna(subset=["ROE %"])
             if not valid_roe_df.empty:
                 top_roe = valid_roe_df.loc[valid_roe_df["ROE %"].idxmax()]
                 kpi_col1.metric("🏆 Cohort ROE Leader", f"{top_roe['Company']}", f"{top_roe['ROE %']:.1f}% ROE")
             
-            # 2. Lowest Valuation P/E (Profitable companies only)
             profitable_df = df[df["PE"] > 0]
             if not profitable_df.empty:
                 lowest_pe = profitable_df.loc[profitable_df["PE"].idxmin()]
@@ -421,7 +583,6 @@ if uploads:
             else:
                 kpi_col2.metric("💎 Lowest Valuation (P/E)", "N/A", "No Profitable Stocks")
                 
-            # 3. Safest Altman Z Score (Non-financials)
             industrial_df = df[df["Altman Z"].notnull()]
             if not industrial_df.empty:
                 safest_z = industrial_df.loc[industrial_df["Altman Z"].idxmax()]
@@ -432,7 +593,7 @@ if uploads:
             st.divider()
 
             selection = st.multiselect(
-                "Select Companies for Comparative Analysis:", 
+                "Select Companies for Deep-Dive Analysis:", 
                 df["Company"].unique(), 
                 default=df["Company"].unique()[:min(4, len(df))]
             )
@@ -440,32 +601,25 @@ if uploads:
             if selection:
                 subset = df[df["Company"].isin(selection)]
                 for _, row in subset.iterrows():
-                    with st.expander(f"Strategic Research Note: {row['Company']} ({row['Sector_Type']})", expanded=True):
-                        c1, c2 = st.columns([1, 2.2])
-                        
-                        with c1:
-                            st.metric("Piotroski Quality", f"{row['Piotroski']}/8")
-                            st.metric("ROE / ROCE", f"{row['ROE %']:.1f}% / {row['ROCE %']:.1f}%")
-                            st.metric("FCF Yield", f"{row['FCF Yield %']:.1f}%")
-                            
-                        with c2:
-                            ic_text = f"{row['Interest Coverage']:.1f}x" if isinstance(row['Interest Coverage'], (int, float)) and row['Interest Coverage'] < 990 else ("Debt-Free" if isinstance(row['Interest Coverage'], (int, float)) else "N/A (Financial)")
-                            pe_text = f"{row['PE']:.1f}x" if row['PE'] > 0 else "N/A (Loss-Making)"
-                            z_text = f"{row['Altman Z']:.2f} ({row['Zone']})" if row['Altman Z'] is not None else "N/A (Financial Entity)"
-                            
-                            st.markdown(f"""
-                            **Institutional Equity Thesis:**  
-                            **{row['Company']}** is operating as a **{row['Sector_Type']}**. The company trades at a P/E valuation of **{pe_text}** with a Free Cash Flow (FCF) yield of **{row['FCF Yield %']:.1f}%**.  
-                            
-                            - **Capital Efficiency:** Delivers an ROE of **{row['ROE %']:.1f}%** and a Return on Capital Employed (ROCE) of **{row['ROCE %']:.1f}%**.  
-                            - **Solvency & Coverage:** Leverage (D/E) stands at **{row['D/E']:.2f}** with an Interest Coverage ratio of **{ic_text}**. Solvency health zone is categorized as **{z_text}**.  
-                            - **Growth & Quality:** 3-Year Sales CAGR of **{row['3Yr Sales CAGR %']:.1f}%** and PAT CAGR of **{row['3Yr PAT CAGR %']:.1f}%**, achieving a Piotroski F-Score of **{row['Piotroski']}/8**.
-                            """)
+                    with st.expander(f"Comprehensive Metric Analysis: {row['Company']} ({row['Sector_Type']})", expanded=True):
+                        st.markdown(generate_explicit_metric_breakdown(row))
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 3: VISUAL ANALYTICS (PLOTLY)
+        # TAB 3: COMPREHENSIVE INVESTMENT THESIS & ALLOCATION
         # ─────────────────────────────────────────────────────────────────────────
         with tab3:
+            st.subheader("🏛️ Comprehensive Investment Thesis & Allocation Strategy")
+            
+            if selection:
+                subset = df[df["Company"].isin(selection)]
+                for _, row in subset.iterrows():
+                    with st.expander(f"Investment Thesis & Trigger Framework: {row['Company']}", expanded=True):
+                        st.markdown(generate_comprehensive_investment_thesis(row))
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 4: VISUAL ANALYTICS (PLOTLY)
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab4:
             st.subheader("Visual Analytics & Cohort Benchmarking")
             
             c1, c2 = st.columns(2)
@@ -533,9 +687,9 @@ if uploads:
                 st.plotly_chart(fig2, use_container_width=True)
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 4: AUTOMATED RISK AUDITOR
+        # TAB 5: AUTOMATED RISK AUDITOR
         # ─────────────────────────────────────────────────────────────────────────
-        with tab4:
+        with tab5:
             st.subheader("🚨 Automated Forensic & Risk Auditor")
             
             for _, row in df.iterrows():
@@ -582,28 +736,35 @@ if uploads:
                 st.divider()
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 5: OFFLINE REPORT EXPORT
+        # TAB 6: OFFLINE REPORT EXPORT
         # ─────────────────────────────────────────────────────────────────────────
-        with tab5:
+        with tab6:
             st.subheader("📄 Institutional Research Export Engine")
             
+            export_sub = df[df["Company"].isin(selection)] if selection else df
+
             report = f"# INSTITUTIONAL EQUITY RESEARCH REPORT\n"
             report += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            report += f"Total Companies Analyzed: {len(df)}\n\n"
+            report += f"Total Companies Analyzed: {len(export_sub)}\n\n"
             report += "=" * 80 + "\n\n"
             
             report += "## 1. COHORT SUMMARY GRID\n\n"
-            report += dataframe_to_markdown_table(df[["Company", "Sector_Type", "Market Cap", "PE", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]])
+            report += dataframe_to_markdown_table(export_sub[["Company", "Sector_Type", "Market Cap", "PE", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]])
             report += "\n\n" + "=" * 80 + "\n\n"
             
-            report += "## 2. STRATEGIC COMPANY NARRATIVES\n\n"
-            for _, row in df.iterrows():
-                report += f"### {row['Company']} ({row['Sector_Type']})\n"
-                report += f"- **Market Cap:** ₹{row['Market Cap']:,.0f} Cr | **Valuation (P/E):** {row['PE']:.1f}x\n"
-                report += f"- **ROE:** {row['ROE %']:.1f}% | **ROCE:** {row['ROCE %']:.1f}% | **FCF Yield:** {row['FCF Yield %']:.1f}%\n"
-                report += f"- **Piotroski Quality Score:** {row['Piotroski']}/8 | **Solvency Zone:** {row['Zone']}\n"
-                report += f"- **3-Yr Revenue CAGR:** {row['3Yr Sales CAGR %']:.1f}% | **3-Yr PAT CAGR:** {row['3Yr PAT CAGR %']:.1f}%\n\n"
+            report += "## 2. EXPLICIT METRIC-BY-METRIC DEEP DIVES\n\n"
+            for _, row in export_sub.iterrows():
+                report += f"### {row['Company']} ({row['Sector_Type']})\n\n"
+                report += generate_explicit_metric_breakdown(row)
+                report += "\n\n" + "-" * 60 + "\n\n"
             
+            report += "=" * 80 + "\n\n"
+            report += "## 3. COMPREHENSIVE INVESTMENT THESES & TRIGGER FRAMEWORKS\n\n"
+            for _, row in export_sub.iterrows():
+                report += f"## {row['Company']} - INVESTMENT THESIS & STRATEGY\n\n"
+                report += generate_comprehensive_investment_thesis(row)
+                report += "\n\n" + "=" * 60 + "\n\n"
+
             col_exp1, col_exp2 = st.columns(2)
             
             col_exp1.download_button(

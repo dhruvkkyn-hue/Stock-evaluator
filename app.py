@@ -500,4 +500,492 @@ def generate_extreme_beginner_translator(row):
         ic_stock = f"Interest Coverage stands at {ic_val:.1f}x operating profit."
     ic_text = f"#### 8. Interest Coverage Ratio (Debt Paydown Buffer) {ic_tag}\n" \
               f"- 💡 **Real-World Analogy:** Think of Interest Coverage as how many times over your monthly salary can pay your mortgage interest installment.\n" \
-              f"-
+              f"- 🔍 **What It Means For {comp}:** {ic_stock}\n" \
+              f"- ⚠️ **When This Metric Can LIE:** In cyclical industries, high interest coverage during peak boom years can vanish rapidly during demand downturns.\n"
+
+    # 9. Sloan Accrual Ratio
+    sloan = row["Sloan %"]
+    if is_fin or sloan is None:
+        sloan_tag = "[🟡 AVERAGE]"
+        sloan_stock = "Sloan Accrual Ratio is N/A for financial entities."
+    else:
+        if sloan <= 5.0 and sloan >= -10.0: sloan_tag = "[🟢 STRONG]"
+        elif sloan <= 10.0: sloan_tag = "[🟡 AVERAGE]"
+        else: sloan_tag = "[🔴 WEAK]"
+        sloan_stock = f"Sloan Ratio is {sloan:.1f}%." + (" (WARNING: >10% paper profit risk)" if sloan > 10 else " (Pristine cash earnings backing)")
+    sloan_text = f"#### 9. Sloan Accrual Ratio (Earnings Quality Check) {sloan_tag}\n" \
+                 f"- 💡 **Real-World Analogy:** Think of Sloan Ratio as a lie-detector test for profits—checking if reported income is real cash in the bank or just uncollected paper promises.\n" \
+                 f"- 🔍 **What It Means For {comp}:** {sloan_stock}\n" \
+                 f"- ⚠️ **When This Metric Can LIE:** Fast-growing companies expanding sales rapidly may show temporary high accruals due to legitimate customer payment terms.\n"
+
+    # 10. Altman Z-Score
+    alt_z = row["Altman Z"]
+    zone = row["Zone"]
+    if is_fin or alt_z is None:
+        alt_tag = "[🟢 STRONG]"
+        alt_stock = "Altman Z is N/A for banks (regulated under capital adequacy ratios)."
+    else:
+        alt_tag = "[🟢 STRONG]" if zone == "Safe" else ("[🟡 AVERAGE]" if zone == "Grey" else "[🔴 WEAK]")
+        alt_stock = f"Altman Z of {alt_z:.2f} classifies the balance sheet in the **{zone} Zone**."
+    alt_text = f"#### 10. Altman Z-Score (Bankruptcy Health Check) {alt_tag}\n" \
+               f"- 💡 **Real-World Analogy:** Think of Altman Z as a doctor's overall health score for a company; scores above 3.0 mean robust health, while below 1.8 warn of bankruptcy distress.\n" \
+               f"- 🔍 **What It Means For {comp}:** {alt_stock}\n" \
+               f"- ⚠️ **When This Metric Can LIE:** Tech and asset-light software firms can trigger false 'Grey' warnings because they don't hold physical machinery assets.\n"
+
+    # 11. Piotroski F-Score
+    p_score = row["Piotroski"]
+    p_tag = "[🟢 STRONG]" if p_score >= 6 else ("[🟡 AVERAGE]" if p_score >= 4 else "[🔴 WEAK]")
+    p_stock = f"Piotroski Score is {p_score}/8, rating operational momentum across 8 key financial checks."
+    p_text = f"#### 11. Piotroski F-Score (9-Point Report Card) {p_tag}\n" \
+             f"- 💡 **Real-World Analogy:** Think of Piotroski as a 9-point fundamental report card covering profitability growth, balance sheet debt reduction, and operational efficiency.\n" \
+             f"- 🔍 **What It Means For {comp}:** {p_stock}\n" \
+             f"- ⚠️ **When This Metric Can LIE:** Piotroski compares current year to previous year; a great company undergoing temporary 1-year CapEx expansion might score low.\n"
+
+    # 12. Free Cash Flow Yield
+    fcf_y = row["FCF Yield %"]
+    fcf_tag = "[🟢 STRONG]" if fcf_y >= 5.0 else ("[🟡 AVERAGE]" if fcf_y >= 1.0 else "[🔴 WEAK]")
+    fcf_stock = f"Free Cash Flow Yield is {fcf_y:.1f}% relative to market capitalization."
+    fcf_text = f"#### 12. Free Cash Flow Yield (Spare Cash Power) {fcf_tag}\n" \
+               f"- 💡 **Real-World Analogy:** Think of Free Cash Flow as spare cash left in your wallet after paying for your rent, food, and home repairs.\n" \
+               f"- 🔍 **What It Means For {comp}:** {fcf_stock}\n" \
+               f"- ⚠️ **When This Metric Can LIE:** A company completing a massive once-in-a-decade factory expansion can show temporarily negative FCF Yield despite strong health.\n"
+
+    return "\n".join([mcap_text, pe_text, eve_text, opm_text, roe_text, roce_text, de_text, ic_text, sloan_text, alt_text, p_text, fcf_text])
+
+def generate_pros_and_cons(row):
+    """Generates detailed bulleted Pros and Cons for a stock."""
+    comp = row["Company"]
+    is_fin = row["Is_Financial"]
+    roe = row["ROE %"]
+    roce = row["ROCE %"]
+    pe = row["PE"]
+    de = row["D/E"]
+    sloan = row["Sloan %"]
+    p_score = row["Piotroski"]
+    zone = row["Zone"]
+    fcf_y = row["FCF Yield %"]
+
+    pros = [
+        f"**Capital Compounding:** Generates an ROE of {roe:.1f}% and ROCE of {roce:.1f}%, proving strong reinvestment yields.",
+        f"**Cash Generation:** Delivers a Free Cash Flow Yield of {fcf_y:.1f}%, confirming profits translate into real bankable cash.",
+        f"**Fundamental Health:** Piotroski Quality Score of {p_score}/8 confirms healthy operational momentum and asset efficiency.",
+        f"**Growth Track Record:** 3-Year Sales CAGR of {row['3Yr Sales CAGR %']:.1f}% demonstrating resilient commercial demand."
+    ]
+
+    cons = [
+        f"**Valuation Premium:** Trades at a P/E multiple of {pe:.1f}x, requiring sustained profit execution.",
+        f"**Leverage & Borrowing:** Debt-to-Equity stands at {de:.2f}x, exposing earnings to interest rate fluctuations.",
+        f"**Solvency Classification:** Balance sheet is classified under the {zone} solvency zone."
+    ]
+    if not is_fin and sloan is not None and sloan > 10.0:
+        cons.append(f"**Accrual Accounting Risk:** Sloan Accrual Ratio is elevated at {sloan:.1f}% (>10%), signaling non-cash paper profit disconnect.")
+
+    pros_md = "\n".join([f"- 🟢 {p}" for p in pros])
+    cons_md = "\n".join([f"- 🔴 {c}" for c in cons])
+
+    return f"### ⚖️ Exhaustive Pros & Cons for {comp}\n\n**🟢 Deep Strengths (Pros):**\n{pros_md}\n\n**🔴 Deep Vulnerabilities (Cons):**\n{cons_md}\n"
+
+def generate_actionable_triggers_framework(row):
+    """
+    Generates explicit BUY Triggers, SELL Triggers, Game-Changer Events, and Final Verdict Badge.
+    """
+    comp = row["Company"]
+    is_fin = row["Is_Financial"]
+    roe = row["ROE %"]
+    pe = row["PE"]
+    de = row["D/E"]
+    sloan = row["Sloan %"]
+    p_score = row["Piotroski"]
+    zone = row["Zone"]
+    fcf_y = row["FCF Yield %"]
+
+    score_points = 0
+    if roe >= 15: score_points += 1
+    if pe > 0 and pe <= 25: score_points += 1
+    if de <= 0.8 or (is_fin and de <= 7.0): score_points += 1
+    if p_score >= 6: score_points += 1
+    if fcf_y >= 3.0: score_points += 1
+    if zone == "Safe" or is_fin: score_points += 1
+
+    if score_points >= 5:
+        signal_tag = "STRONG BUY"
+        tag_html = f"<div class='signal-tag-strong-buy'>🟢 FINAL VERDICT: [STRONG BUY]</div>"
+    elif score_points >= 3:
+        signal_tag = "ACCUMULATE ON DIPS"
+        tag_html = f"<div class='signal-tag-accumulate'>🔵 FINAL VERDICT: [ACCUMULATE ON DIPS]</div>"
+    elif score_points >= 2:
+        signal_tag = "HOLD / WATCHLIST"
+        tag_html = f"<div class='signal-tag-hold'>🟡 FINAL VERDICT: [HOLD / WATCHLIST]</div>"
+    else:
+        signal_tag = "AVOID / EXIT"
+        tag_html = f"<div class='signal-tag-avoid'>🔴 FINAL VERDICT: [AVOID / EXIT]</div>"
+
+    buy_triggers = [
+        f"Buy if P/E drops below 25.0x (currently {pe:.1f}x) while ROE remains strong above 15.0%.",
+        f"Accumulate if Free Cash Flow Yield expands above 4.0% (currently {fcf_y:.1f}%), proving high cash conversion.",
+        f"Buy/Add if Piotroski Score remains >= 6/8 (currently {p_score}/8) alongside balance sheet debt paydown."
+    ]
+
+    sell_triggers = [
+        f"Sell/Exit if Altman Z-Score falls below 1.81 into Distress Zone (currently {zone}).",
+        f"Exit if Debt-to-Equity ratio exceeds 1.5x (currently {de:.2f}x) due to unmanaged borrowing.",
+        f"Sell/Avoid if Sloan Accrual Ratio spikes above 10.0%" + (f" (currently {sloan:.1f}%)" if sloan is not None else "") + " indicating paper profit disconnect."
+    ]
+
+    game_changers = [
+        f"**CWIP Commissioning Catalyst:** Major ongoing expansion projects completing and driving revenue acceleration by >20% YoY.",
+        f"**Debt Payoff Catalyst:** De-leveraging balance sheet bringing D/E below 0.3x, significantly lowering interest expense.",
+        f"**Macro Risk Event:** Severe raw material price spike or key customer default contracting OPM by >250 bps."
+    ]
+
+    buy_str = "\n".join([f"- 🟢 **Trigger {idx+1}:** {bt}" for idx, bt in enumerate(buy_triggers)])
+    sell_str = "\n".join([f"- 🔴 **Trigger {idx+1}:** {st}" for idx, st in enumerate(sell_triggers)])
+    gc_str = "\n".join([f"- 🔄 **Catalyst {idx+1}:** {gc}" for idx, gc in enumerate(game_changers)])
+
+    framework_md = f"### 🚦 Actionable Decision Framework for {comp}\n\n" \
+                   f"**Verdict Tag:** `[{signal_tag}]`\n\n" \
+                   f"#### 🟢 Exact BUY Triggers (When to Buy):\n{buy_str}\n\n" \
+                   f"#### 🔴 Exact SELL Triggers (When to Sell / Avoid):\n{sell_str}\n\n" \
+                   f"#### 🔄 Game-Changer Events (What Changes Thesis):\n{gc_str}\n"
+
+    return tag_html, framework_md
+
+def generate_beginner_executive_summary(df_sub):
+    """Generates plain-English executive summary declaring Safest, Highest Growth, and Highest Risk picks."""
+    if df_sub.empty:
+        return "No stocks selected for comparison."
+
+    safest_df = df_sub.sort_values(by=["Piotroski", "ROE %"], ascending=[False, False])
+    safest_pick = safest_df.iloc[0]
+
+    growth_df = df_sub.sort_values(by=["3Yr Sales CAGR %", "ROCE %"], ascending=[False, False])
+    growth_pick = growth_df.iloc[0]
+
+    risk_df = df_sub.sort_values(by=["D/E", "Sloan %"], ascending=[False, False])
+    risk_pick = risk_df.iloc[0]
+
+    summary_md = f"## 🏆 Ultimate Beginner Executive Summary\n\n" \
+                 f"### 🛡️ 1. The Safest Long-Term Pick: **{safest_pick['Company']}**\n" \
+                 f"- **Why It Wins:** Delivers a top Piotroski Score of **{safest_pick['Piotroski']}/8**, ROE of **{safest_pick['ROE %']:.1f}%**, and strong balance sheet health (**{safest_pick['Zone']} Zone**).\n\n" \
+                 f"### 🚀 2. The Highest Growth Pick: **{growth_pick['Company']}**\n" \
+                 f"- **Why It Wins:** Leads the cohort with a 3-Year Revenue CAGR of **{growth_pick['3Yr Sales CAGR %']:.1f}%** and ROCE of **{growth_pick['ROCE %']:.1f}%**.\n\n" \
+                 f"### 💣 3. The Highest Risk Pick: **{risk_pick['Company']}**\n" \
+                 f"- **Why It Requires Caution:** Carries the highest balance sheet leverage (D/E: **{risk_pick['D/E']:.2f}x**) or elevated accruals, requiring strict monitoring.\n"
+
+    return summary_md
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. UI & CONTROL FLOW
+# ─────────────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.header("📂 Batch Ingestion")
+    uploads = st.file_uploader("Upload Screener Excels", type=["xlsx", "xls"], accept_multiple_files=True)
+    st.divider()
+    st.markdown("### ⚙️ Terminal Settings")
+    max_pe_bound = st.slider("Scatter Plot Max P/E Axis Limit", min_value=50, max_value=300, value=150, step=25, 
+                             help="Clips scatter plot x-axis upper bound to prevent valuation outliers from compressing the chart.")
+    st.divider()
+    st.caption(f"Institutional Terminal v5.0 | {datetime.now().year}")
+
+st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
+st.markdown("<p class='hero-subtitle'>Dynamic Quantitative Auditor & Multi-Asset Valuation Architecture</p>", unsafe_allow_html=True)
+
+if uploads:
+    results = []
+    raw_files = []
+    for up in uploads:
+        data, b_content = process_workbook(up.getvalue(), up.name)
+        if data:
+            results.append(data)
+            raw_files.append((up.name, b_content))
+
+    if results:
+        df = pd.DataFrame(results)
+        
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+            "📊 Matrix", "💡 Extreme Translator", "⚖️ Pros & Cons", 
+            "🚦 Actionable Strategy", "📈 Visuals", "🚨 Risk Audit", "📄 Export Report"
+        ])
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 1: MASTER QUANTITATIVE MATRIX
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab1:
+            st.subheader("Master Quantitative Grid")
+            
+            disp_df = df.copy()
+            st.dataframe(
+                disp_df[[
+                    "Company", "Sector_Type", "Market Cap", "Sales", "Net Profit", 
+                    "PE", "EV/EBITDA", "ROE %", "ROCE %", "D/E", "Interest Coverage", 
+                    "FCF Yield %", "Piotroski", "Altman Z", "Zone"
+                ]].style.format({
+                    "Market Cap": "₹{:,.0f}Cr", 
+                    "Sales": "₹{:,.0f}Cr", 
+                    "Net Profit": "₹{:,.0f}Cr",
+                    "PE": lambda x: f"{x:.1f}x" if x > 0 else "N/A (Loss)",
+                    "EV/EBITDA": lambda x: f"{x:.1f}x" if x > 0 else "N/A",
+                    "ROE %": "{:.1f}%",
+                    "ROCE %": "{:.1f}%", 
+                    "D/E": "{:.2f}", 
+                    "Interest Coverage": lambda x: f"{x:.1f}x" if isinstance(x, (int, float)) and x < 990 else ("Debt Free" if isinstance(x, (int, float)) else "N/A"),
+                    "FCF Yield %": "{:.1f}%", 
+                    "Altman Z": lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else "N/A"
+                }).background_gradient(subset=["Piotroski"], cmap="RdYlGn"),
+                use_container_width=True
+            )
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 2: EXTREME PLAIN-ENGLISH TRANSLATOR (ALL 12 METRICS)
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab2:
+            st.subheader("💡 Extreme Plain-English Metric Translator & Limitations")
+            
+            kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
+            
+            valid_roe_df = df.dropna(subset=["ROE %"])
+            if not valid_roe_df.empty:
+                top_roe = valid_roe_df.loc[valid_roe_df["ROE %"].idxmax()]
+                kpi_col1.metric("🏆 Cohort ROE Leader", f"{top_roe['Company']}", f"{top_roe['ROE %']:.1f}% ROE")
+            
+            profitable_df = df[df["PE"] > 0]
+            if not profitable_df.empty:
+                lowest_pe = profitable_df.loc[profitable_df["PE"].idxmin()]
+                kpi_col2.metric("💎 Lowest Valuation (P/E)", f"{lowest_pe['Company']}", f"{lowest_pe['PE']:.1f}x P/E")
+            else:
+                kpi_col2.metric("💎 Lowest Valuation (P/E)", "N/A", "No Profitable Stocks")
+                
+            industrial_df = df[df["Altman Z"].notnull()]
+            if not industrial_df.empty:
+                safest_z = industrial_df.loc[industrial_df["Altman Z"].idxmax()]
+                kpi_col3.metric("🛡️ Safest Solvency (Altman Z)", f"{safest_z['Company']}", f"Z-Score {safest_z['Altman Z']:.2f}")
+            else:
+                kpi_col3.metric("🛡️ Safest Solvency (Altman Z)", "Banking Cohort", "N/A (Financials)")
+
+            st.divider()
+
+            selection = st.multiselect(
+                "Select Companies for Deep Analysis:", 
+                df["Company"].unique(), 
+                default=df["Company"].unique()[:min(4, len(df))]
+            )
+            
+            if selection:
+                subset = df[df["Company"].isin(selection)]
+                for _, row in subset.iterrows():
+                    with st.expander(f"All 12 Metrics Plain-English Guide: {row['Company']} ({row['Sector_Type']})", expanded=True):
+                        st.markdown(generate_extreme_beginner_translator(row))
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 3: EXHAUSTIVE PROS & CONS
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab3:
+            st.subheader("⚖️ Exhaustive Pros & Cons Matrix")
+            
+            if selection:
+                subset = df[df["Company"].isin(selection)]
+                for _, row in subset.iterrows():
+                    with st.expander(f"Deep Strengths & Vulnerabilities: {row['Company']}", expanded=True):
+                        st.markdown(generate_pros_and_cons(row))
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 4: ACTIONABLE BUY/SELL STRATEGY & EXECUTIVE SUMMARY
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab4:
+            st.subheader("🚦 Actionable Trading Framework & Executive Summary")
+            
+            if selection:
+                subset = df[df["Company"].isin(selection)]
+                
+                # Show Executive Summary comparing cohort
+                st.markdown(generate_beginner_executive_summary(subset))
+                st.divider()
+                
+                for _, row in subset.iterrows():
+                    with st.expander(f"Decision Rules & Game-Changer Catalysts: {row['Company']}", expanded=True):
+                        tag_html, framework_md = generate_actionable_triggers_framework(row)
+                        st.markdown(tag_html, unsafe_allow_html=True)
+                        st.markdown(framework_md)
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 5: VISUAL ANALYTICS (PLOTLY)
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab5:
+            st.subheader("Visual Analytics & Cohort Benchmarking")
+            
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                scatter_df = df.copy()
+                scatter_df["Plot_PE"] = scatter_df["PE"].apply(lambda x: min(x, max_pe_bound) if x > 0 else 0)
+                scatter_df["PE_Label"] = scatter_df["PE"].apply(lambda x: f"{x:.1f}x" if x > 0 else "Negative P/E")
+
+                fig1 = px.scatter(
+                    scatter_df, 
+                    x="Plot_PE", 
+                    y="OPM %", 
+                    size="Market Cap", 
+                    color="Zone",
+                    hover_name="Company",
+                    hover_data={
+                        "Plot_PE": False,
+                        "PE_Label": True,
+                        "ROE %": ":.1f%",
+                        "Piotroski": True,
+                        "Sector_Type": True
+                    },
+                    title=f"Valuation (P/E) vs. Profitability (OPM/Margin %) [Max Axis: {max_pe_bound}x]",
+                    color_discrete_map={
+                        "Safe": "#10b981", 
+                        "Grey": "#f59e0b", 
+                        "Distress": "#ef4444", 
+                        "N/A (Financial)": "#3b82f6"
+                    }
+                )
+                
+                fig1.update_layout(
+                    template="plotly_dark",
+                    xaxis_title="P/E Ratio (Capped Bounds)",
+                    yaxis_title="Margin / Profitability %",
+                    xaxis=dict(range=[-5, max_pe_bound + 10])
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+                st.caption("ℹ️ Note: P/E axis is bounded between -5x and user-defined limit to prevent extreme valuation outliers from compressing the visual.")
+
+            with c2:
+                bar_companies = selection if selection else df['Company'].tolist()
+                bar_df = df[df['Company'].isin(bar_companies)]
+                
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(
+                    x=bar_df['Company'], 
+                    y=bar_df['Piotroski'], 
+                    name='Piotroski F-Score (0-8)',
+                    marker_color='#10b981'
+                ))
+                fig2.add_trace(go.Bar(
+                    x=bar_df['Company'], 
+                    y=[z if z is not None else 0 for z in bar_df['Altman Z']], 
+                    name='Altman Z-Score',
+                    marker_color='#3b82f6'
+                ))
+                fig2.update_layout(
+                    title="Fundamental Quality (Piotroski) vs. Solvency (Altman Z)",
+                    barmode='group',
+                    template="plotly_dark",
+                    yaxis_title="Score / Z-Value"
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 6: AUTOMATED RISK AUDITOR
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab6:
+            st.subheader("🚨 Automated Forensic & Risk Auditor")
+            
+            for _, row in df.iterrows():
+                st.write(f"### {row['Company']} <span class='sector-badge'>{row['Sector_Type']}</span>", unsafe_allow_html=True)
+                cols = st.columns(4)
+                
+                # 1. Cash Conversion Risk
+                if row['Net Profit'] > 0 and row['FCF'] < 0:
+                    cols[0].error("⚠️ Cash Conversion\nNegative FCF despite PAT.")
+                else: 
+                    cols[0].success("✅ Cash Flow OK")
+
+                # 2. Solvency Risk
+                if not row['Is_Financial']:
+                    ic_val = row['Interest Coverage'] if isinstance(row['Interest Coverage'], (int, float)) else 999
+                    if row['D/E'] > 1.5 and ic_val < 2.5:
+                        cols[1].error("⚠️ Solvency Risk\nHigh Debt / Low Coverage.")
+                    else: 
+                        cols[1].success("✅ Solvency OK")
+                else:
+                    if row['D/E'] > 8.0:
+                        cols[1].warning("⚠️ High Banking Leverage\nD/E > 8.0x")
+                    else:
+                        cols[1].success("✅ Banking Leverage OK")
+
+                # 3. Accrual Risk
+                if not row['Is_Financial'] and row['Sloan %'] is not None:
+                    if row['Sloan %'] > 10.0:
+                        cols[2].warning("⚠️ Accrual Risk\nSloan Ratio > 10%.")
+                    else: 
+                        cols[2].success("✅ Accruals OK")
+                else:
+                    cols[2].info("ℹ️ Accruals N/A\nFinancial Entity")
+
+                # 4. Execution Risk
+                if not row['Is_Financial']:
+                    if row['CWIP to Net Block %'] > 40.0:
+                        cols[3].warning("⚠️ Execution Risk\nExtreme CWIP Level (>40%).")
+                    else: 
+                        cols[3].success("✅ Asset Health OK")
+                else:
+                    cols[3].info("ℹ️ Asset Health OK\nNo Physical CWIP")
+                    
+                st.divider()
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 7: OFFLINE REPORT EXPORT
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab7:
+            st.subheader("📄 Institutional Research Export Engine")
+            
+            export_sub = df[df["Company"].isin(selection)] if selection else df
+
+            report = f"# INSTITUTIONAL EQUITY RESEARCH REPORT & BEGINNER GUIDE\n"
+            report += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            report += f"Total Companies Analyzed: {len(export_sub)}\n\n"
+            report += "=" * 80 + "\n\n"
+            
+            report += "## 1. COHORT SUMMARY GRID\n\n"
+            report += dataframe_to_markdown_table(export_sub[["Company", "Sector_Type", "Market Cap", "PE", "EV/EBITDA", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]])
+            report += "\n\n" + "=" * 80 + "\n\n"
+            
+            report += generate_beginner_executive_summary(export_sub)
+            report += "\n\n" + "=" * 80 + "\n\n"
+            
+            report += "## 2. EXTREME PLAIN-ENGLISH TRANSLATOR & LIMITATIONS (ALL 12 METRICS)\n\n"
+            for _, row in export_sub.iterrows():
+                report += f"### {row['Company']} ({row['Sector_Type']})\n\n"
+                report += generate_extreme_beginner_translator(row)
+                report += "\n\n" + "-" * 60 + "\n\n"
+            
+            report += "=" * 80 + "\n\n"
+            report += "## 3. EXHAUSTIVE PROS & CONS\n\n"
+            for _, row in export_sub.iterrows():
+                report += generate_pros_and_cons(row)
+                report += "\n\n" + "-" * 60 + "\n\n"
+
+            report += "=" * 80 + "\n\n"
+            report += "## 4. ACTIONABLE BUY / SELL / HOLD STRATEGY & TRIGGERS\n\n"
+            for _, row in export_sub.iterrows():
+                _, framework_md = generate_actionable_triggers_framework(row)
+                report += framework_md
+                report += "\n\n" + "=" * 60 + "\n\n"
+
+            col_exp1, col_exp2 = st.columns(2)
+            
+            col_exp1.download_button(
+                "📥 Download Institutional Research Report (.md)", 
+                data=report, 
+                file_name=f"Institutional_Terminal_Report_{datetime.now().strftime('%Y%m%d')}.md",
+                mime="text/markdown"
+            )
+            
+            zip_io = io.BytesIO()
+            with zipfile.ZipFile(zip_io, 'w') as zf:
+                for fname, content in raw_files: 
+                    zf.writestr(f"Processed_{fname}", content)
+            
+            col_exp2.download_button(
+                "📥 Download Ingestion Package (.zip)", 
+                data=zip_io.getvalue(), 
+                file_name="Ingested_Workbooks_Package.zip",
+                mime="application/zip"
+            )
+
+else:
+    st.info("👋 Upload Screener.in Excel exports in the sidebar to run quantitative analysis.")

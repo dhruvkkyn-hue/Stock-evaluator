@@ -93,26 +93,50 @@ def inject_custom_css():
             font-weight: 600;
             border: 1px solid #0284c7;
         }
-        .thesis-card {
-            background-color: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 15px;
+        
+        .signal-tag-strong-buy {
+            background-color: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #10b981;
+            display: inline-block;
+            margin-bottom: 12px;
         }
-        .trigger-box-buy {
-            background-color: rgba(16, 185, 129, 0.08);
-            border-left: 4px solid #10b981;
-            padding: 12px 16px;
-            border-radius: 4px;
-            margin-bottom: 10px;
+        .signal-tag-accumulate {
+            background-color: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #3b82f6;
+            display: inline-block;
+            margin-bottom: 12px;
         }
-        .trigger-box-sell {
-            background-color: rgba(239, 68, 68, 0.08);
-            border-left: 4px solid #ef4444;
-            padding: 12px 16px;
-            border-radius: 4px;
-            margin-bottom: 10px;
+        .signal-tag-hold {
+            background-color: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #f59e0b;
+            display: inline-block;
+            margin-bottom: 12px;
+        }
+        .signal-tag-avoid {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #ef4444;
+            display: inline-block;
+            margin-bottom: 12px;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -338,169 +362,274 @@ def dataframe_to_markdown_table(df_sub):
     return "\n".join([header_row, sep_row] + data_rows)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. QUALITATIVE GENERATION ENGINE: EXPLICIT METRIC DEEP DIVES & THESES
+# 3. BEGINNER TRANSLATOR & ACTIONABLE TRIGGER ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_explicit_metric_breakdown(row):
-    """Generates rigorous metric-by-metric institutional breakdown paragraphs for a stock."""
-    is_fin = row["Is_Financial"]
+def generate_beginner_metric_translator(row):
+    """
+    Generates plain-English beginner explanations, benchmark signals [🟢 STRONG], [🟡 AVERAGE], [🔴 WEAK],
+    and stock-specific breakdown for each key financial metric.
+    """
     comp = row["Company"]
+    is_fin = row["Is_Financial"]
     
-    # 1. Valuation & Pricing
+    # 1. Market Capitalization
+    mcap = row["Market Cap"]
+    if mcap >= 50000:
+        mcap_sig = "[🟢 STRONG]"
+        mcap_eval = f"₹{mcap:,.0f} Cr places {comp} as a Large-Cap giant, providing high liquidity and stability."
+    elif mcap >= 15000:
+        mcap_sig = "[🟡 AVERAGE]"
+        mcap_eval = f"₹{mcap:,.0f} Cr makes {comp} a Mid-Cap stock, offering a balanced mix of growth potential and stability."
+    else:
+        mcap_sig = "[🟡 AVERAGE]"
+        mcap_eval = f"₹{mcap:,.0f} Cr places {comp} as a Small-Cap firm with high growth upside but higher market volatility."
+        
+    mcap_text = f"**1. Market Capitalization (Company Size) {mcap_sig}**\n" \
+                f"- *Beginner Explanation:* Think of Market Cap as the total price tag to buy the entire company today.\n" \
+                f"- *Stock Insight:* {mcap_eval}\n"
+
+    # 2. P/E Ratio
     pe = row["PE"]
     if pe > 0:
-        if pe < 15:
-            pe_eval = f"at a deep value / depressed multiple of {pe:.1f}x P/E, offering potential valuation re-rating if operational momentum sustains."
-        elif pe <= 35:
-            pe_eval = f"at a fair market valuation multiple of {pe:.1f}x P/E, pricing in baseline compound growth without excessive speculative premium."
+        if pe <= 20:
+            pe_sig = "[🟢 STRONG]"
+            pe_eval = f"At {pe:.1f}x earnings, the stock is reasonably priced relative to its profit generation."
+        elif pe <= 40:
+            pe_sig = "[🟡 AVERAGE]"
+            pe_eval = f"At {pe:.1f}x earnings, investors are paying a moderate premium for expected future growth."
         else:
-            pe_eval = f"at a premium growth multiple of {pe:.1f}x P/E, requiring execution excellence and continuous high earnings growth to prevent multiple contraction."
+            pe_sig = "[🔴 WEAK]"
+            pe_eval = f"At a high {pe:.1f}x P/E multiple, the stock is expensive, requiring high future profit growth to justify its price."
     else:
-        pe_eval = "with a negative P/E multiple due to reported trailing net losses, making classical earnings-based valuation non-applicable and requiring asset-based or cash flow recovery analysis."
-    
-    val_text = f"**1. Valuation Multiple (P/E Ratio):** {comp} is currently priced {pe_eval} From an institutional standpoint, trailing earnings valuation reflects market expectations regarding growth durability. Industry benchmarks vary widely between asset-light high-margin businesses (where 30-40x P/E can be justified) and cyclical commodity producers (where single-digit P/E is standard)."
+        pe_sig = "[🔴 WEAK]"
+        pe_eval = "P/E is negative because the company reported a net loss recently."
 
-    # 2. Capital Efficiency & Returns (ROE & ROCE)
-    roe = row["ROE %"]
-    roce = row["ROCE %"]
-    if roe > 18:
-        roe_eval = f"demonstrates outstanding equity compounding power with an ROE of {roe:.1f}%, exceeding cost of equity thresholds by a wide margin."
-    elif roe >= 10:
-        roe_eval = f"delivers moderate equity capital returns with an ROE of {roe:.1f}%, indicating steady reinvestment yield."
-    else:
-        roe_eval = f"exhibits sub-par equity capital return of {roe:.1f}%, signalling potential capital misallocation or cyclically suppressed profits."
+    pe_text = f"**2. P/E Ratio (Valuation Price Tag) {pe_sig}**\n" \
+              f"- *Beginner Explanation:* Think of P/E as how many dollars you are paying for every $1 of annual profit the company earns.\n" \
+              f"- *Stock Insight:* {pe_eval}\n"
 
-    roce_eval = f"ROCE stands at {roce:.1f}%." + (" For industrial firms, a ROCE above 15% signifies strong economic moats and pricing power over capital providers." if not is_fin else " For financial entities, return on total funds employed reflects spread management efficiency.")
-    
-    cap_text = f"**2. Capital Efficiency & Compound Returns (ROE & ROCE):** {comp} {roe_eval} Simultaneously, {roce_eval} Institutional investors closely monitor the spread between ROCE and the weighted average cost of capital (WACC); a wide positive spread confirms value creation."
-
-    # 3. Profitability & Operating Margins
+    # 3. Profitability (OPM %)
     opm = row["OPM %"]
     if is_fin:
-        margin_label = "Net Margin (PAT / Income)"
-        margin_eval = f"stands at {opm:.1f}%. In banking and credit underwriting, net income margin captures asset quality, credit cost management, and net interest spread efficiency."
-    else:
-        margin_label = "Operating Profit Margin (OPM)"
-        if opm > 20:
-            margin_eval = f"expands to a robust {opm:.1f}%, reflecting premium product positioning, cost leadership, or high value-addition capabilities."
+        if opm >= 20:
+            opm_sig = "[🟢 STRONG]"
+            opm_eval = f"Net Margin is strong at {opm:.1f}%, showing high efficiency in converting income to net profit."
         elif opm >= 10:
-            margin_eval = f"sits at {opm:.1f}%, aligned with competitive commercial operating norms but susceptible to raw material cost inflation."
+            opm_sig = "[🟡 AVERAGE]"
+            opm_eval = f"Net Margin is fair at {opm:.1f}%."
         else:
-            margin_eval = f"is constrained at {opm:.1f}%, highlighting thin operating buffers and heightened sensitivity to input price fluctuations."
-
-    prof_text = f"**3. Operational Profitability ({margin_label}):** The current margin profile {margin_eval} Sustaining or expanding margins during macro inflationary cycles is a primary qualitative indicator of structural pricing power."
-
-    # 4. Solvency, Leverage & Coverage
-    de = row["D/E"]
-    ic = row["Interest Coverage"]
-    alt_z = row["Altman Z"]
-    zone = row["Zone"]
-    
-    if is_fin:
-        solv_eval = f"Financial leverage (D/E) is measured at {de:.2f}x. High leverage is standard for deposit-taking entities where financial liabilities represent funding capital. Solvency is classified under banking regulatory frameworks rather than manufacturing Z-scores."
+            opm_sig = "[🔴 WEAK]"
+            opm_eval = f"Net Margin is thin at {opm:.1f}%, leaving little margin for credit losses."
+        opm_name = "Net Margin (Banking Profitability)"
     else:
-        ic_str = f"{ic:.1f}x" if isinstance(ic, (int, float)) and ic < 990 else "Debt Free"
-        z_str = f"{alt_z:.2f}" if alt_z is not None else "N/A"
-        solv_eval = f"Debt-to-Equity leverage stands at {de:.2f}x with an Interest Coverage Ratio of {ic_str}. The combined balance sheet solvency is evaluated via an Altman Z-Score of {z_str}, placing the enterprise in the **{zone}** health classification zone. A Z-Score above 2.99 confirms negligible short-to-medium term bankruptcy vulnerability."
+        if opm >= 18:
+            opm_sig = "[🟢 STRONG]"
+            opm_eval = f"OPM is healthy at {opm:.1f}%, keeping over 18 cents of profit for every dollar sold."
+        elif opm >= 10:
+            opm_sig = "[🟡 AVERAGE]"
+            opm_eval = f"OPM is average at {opm:.1f}%, keeping 10-18 cents per dollar sold."
+        else:
+            opm_sig = "[🔴 WEAK]"
+            opm_eval = f"OPM is low at {opm:.1f}%, meaning raw material or operating costs absorb most revenue."
+        opm_name = "Operating Profit Margin (OPM %)"
 
-    solv_text = f"**4. Solvency, Debt Structure & Balance Sheet Coverage:** {solv_eval}"
+    opm_text = f"**3. {opm_name} {opm_sig}**\n" \
+               f"- *Beginner Explanation:* Think of OPM as how much cash profit the company keeps out of every $100 it collects in sales after paying production costs.\n" \
+               f"- *Stock Insight:* {opm_eval}\n"
 
-    # 5. Earnings Quality & Sloan Accrual Ratio
+    # 4. ROE %
+    roe = row["ROE %"]
+    if roe >= 18:
+        roe_sig = "[🟢 STRONG]"
+        roe_eval = f"ROE of {roe:.1f}% shows excellent compounding efficiency on shareholder equity."
+    elif roe >= 12:
+        roe_sig = "[🟡 AVERAGE]"
+        roe_eval = f"ROE of {roe:.1f}% represents steady, solid return on shareholder capital."
+    else:
+        roe_sig = "[🔴 WEAK]"
+        roe_eval = f"ROE of {roe:.1f}% is weak, indicating low profit yield on invested equity."
+
+    roe_text = f"**4. Return on Equity (ROE %) {roe_sig}**\n" \
+               f"- *Beginner Explanation:* Think of ROE as how many dollars of profit the company generates for every $100 of shareholders' own money invested.\n" \
+               f"- *Stock Insight:* {roe_eval}\n"
+
+    # 5. ROCE %
+    roce = row["ROCE %"]
+    if roce >= 15:
+        roce_sig = "[🟢 STRONG]"
+        roce_eval = f"ROCE of {roce:.1f}% proves the company generates high returns on all employed capital (equity + debt)."
+    elif roce >= 10:
+        roce_sig = "[🟡 AVERAGE]"
+        roce_eval = f"ROCE of {roce:.1f}% is adequate."
+    else:
+        roce_sig = "[🔴 WEAK]"
+        roce_eval = f"ROCE of {roce:.1f}% is poor, suggesting low efficiency across physical assets and debt."
+
+    roce_text = f"**5. Return on Capital Employed (ROCE %) {roce_sig}**\n" \
+                f"- *Beginner Explanation:* Think of ROCE as how effectively the business earns profits from ALL capital raised (both owner equity and borrowed bank debt).\n" \
+                f"- *Stock Insight:* {roce_eval}\n"
+
+    # 6. Debt-to-Equity (D/E)
+    de = row["D/E"]
+    if is_fin:
+        if de <= 6.0:
+            de_sig = "[🟢 STRONG]"
+            de_eval = f"Banking D/E of {de:.2f}x reflects conservative financial leverage relative to deposits."
+        elif de <= 8.5:
+            de_sig = "[🟡 AVERAGE]"
+            de_eval = f"Banking D/E of {de:.2f}x is within normal deposit-taking leverage bounds."
+        else:
+            de_sig = "[🔴 WEAK]"
+            de_eval = f"Banking D/E of {de:.2f}x is high, requiring diligent credit risk management."
+    else:
+        if de <= 0.5:
+            de_sig = "[🟢 STRONG]"
+            de_eval = f"D/E of {de:.2f}x is low, indicating a pristine, low-debt balance sheet."
+        elif de <= 1.2:
+            de_sig = "[🟡 AVERAGE]"
+            de_eval = f"D/E of {de:.2f}x represents manageable borrowing."
+        else:
+            de_sig = "[🔴 WEAK]"
+            de_eval = f"D/E of {de:.2f}x is heavy, meaning the company relies heavily on borrowed funds."
+
+    de_text = f"**6. Debt-to-Equity Ratio (Borrowing Risk) {de_sig}**\n" \
+              f"- *Beginner Explanation:* Think of D/E as comparing how much money the business owes to banks versus how much money the owners put in.\n" \
+              f"- *Stock Insight:* {de_eval}\n"
+
+    # 7. Sloan Accrual Ratio
     sloan = row["Sloan %"]
     if is_fin or sloan is None:
-        sloan_text = f"**5. Earnings Quality & Sloan Accrual Ratio:** Sloan Accrual Ratio is N/A for financial institutions due to specialized loan-loss provision accounting and credit cash flow timing."
+        sloan_sig = "[🟡 AVERAGE]"
+        sloan_eval = "Sloan Ratio is N/A for banks due to specialized loan-loss reserve accounting."
     else:
-        if sloan > 10.0:
-            sloan_eval = f"stands elevated at {sloan:.1f}% (>10.0% threshold), raising red flags regarding aggressive revenue recognition, uncollected receivables, or non-cash inventory build-up."
-        elif sloan < -10.0:
-            sloan_eval = f"is deeply negative at {sloan:.1f}%, indicating highly conservative accounting with operating cash flow substantially exceeding reported net profit."
+        if sloan <= 5.0 and sloan >= -10.0:
+            sloan_sig = "[🟢 STRONG]"
+            sloan_eval = f"Sloan Ratio of {sloan:.1f}% confirms that profits are backed by actual cash receipts."
+        elif sloan <= 10.0:
+            sloan_sig = "[🟡 AVERAGE]"
+            sloan_eval = f"Sloan Ratio of {sloan:.1f}% is acceptable."
         else:
-            sloan_eval = f"sits in the pristine neutral zone at {sloan:.1f}%, confirming that reported earnings are backed by actual cash receipts."
-        sloan_text = f"**5. Earnings Quality & Accrual Accounting (Sloan Ratio):** The Sloan Accrual Ratio for {comp} {sloan_eval}"
+            sloan_sig = "[🔴 WEAK]"
+            sloan_eval = f"Sloan Ratio of {sloan:.1f}% (>10%) warns that paper profits exceed actual cash collected."
 
-    # 6. Cash Conversion & FCF Yield
-    fcf = row["FCF"]
-    fcf_y = row["FCF Yield %"]
-    fcf_text = f"**6. Cash Flow Generation & Free Cash Flow Yield:** The enterprise generated absolute Free Cash Flow (FCF = CFO - CapEx) of ₹{fcf:,.0f} Cr, translating into an FCF Yield of {fcf_y:.1f}% relative to market capitalization. FCF yield represents the unencumbered cash available for dividend distribution, debt paydown, or strategic bolt-on acquisitions."
+    sloan_text = f"**7. Sloan Accrual Ratio (Earnings Quality Check) {sloan_sig}**\n" \
+                 f"- *Beginner Explanation:* Think of Sloan Ratio as a lie-detector test for profits—it checks if reported income is real cash in the bank or just unpaid IOU promises on paper.\n" \
+                 f"- *Stock Insight:* {sloan_eval}\n"
 
-    # 7. Piotroski F-Score
+    # 8. Altman Z-Score
+    alt_z = row["Altman Z"]
+    zone = row["Zone"]
+    if is_fin or alt_z is None:
+        alt_sig = "[🟢 STRONG]"
+        alt_eval = "Altman Z is N/A for banks (regulated by capital adequacy ratios instead)."
+    else:
+        if zone == "Safe":
+            alt_sig = "[🟢 STRONG]"
+            alt_eval = f"Altman Z of {alt_z:.2f} puts {comp} in the **Safe Zone**, showing zero insolvency danger."
+        elif zone == "Grey":
+            alt_sig = "[🟡 AVERAGE]"
+            alt_eval = f"Altman Z of {alt_z:.2f} puts {comp} in the **Grey Zone**, suggesting caution."
+        else:
+            alt_sig = "[🔴 WEAK]"
+            alt_eval = f"Altman Z of {alt_z:.2f} puts {comp} in the **Distress Zone**, signaling elevated financial stress."
+
+    alt_text = f"**8. Altman Z-Score (Bankruptcy Health Check) {alt_sig}**\n" \
+               f"- *Beginner Explanation:* Think of Altman Z as a doctor's health score for a company's balance sheet; scores above 3.0 mean robust health, while scores below 1.8 warn of bankruptcy risk.\n" \
+               f"- *Stock Insight:* {alt_eval}\n"
+
+    # 9. Piotroski F-Score
     p_score = row["Piotroski"]
     if p_score >= 6:
-        p_eval = f"achieves an excellent score of {p_score}/8, signaling strong fundamental momentum, improving asset turn, and operational efficiency."
+        p_sig = "[🟢 STRONG]"
+        p_eval = f"Score of {p_score}/8 shows high financial strength and improving operating momentum."
     elif p_score >= 4:
-        p_eval = f"scores a moderate {p_score}/8, reflecting acceptable baseline health with minor operational areas requiring monitoring."
+        p_sig = "[🟡 AVERAGE]"
+        p_eval = f"Score of {p_score}/8 indicates stable, average business health."
     else:
-        p_eval = f"scores a weak {p_score}/8, pointing to structural operational friction, deteriorating leverage, or margin pressures."
-        
-    piot_text = f"**7. Piotroski Fundamental Quality Score:** {comp} {p_eval}"
+        p_sig = "[🔴 WEAK]"
+        p_eval = f"Score of {p_score}/8 reveals weak fundamental momentum."
 
-    return "\n\n".join([val_text, cap_text, prof_text, solv_text, sloan_text, fcf_text, piot_text])
+    p_text = f"**9. Piotroski F-Score (9-Point Report Card) {p_sig}**\n" \
+             f"- *Beginner Explanation:* Think of Piotroski as a 9-point report card covering profitability, cash flow, debt reduction, and operational efficiency.\n" \
+             f"- *Stock Insight:* {p_eval}\n"
 
-def generate_comprehensive_investment_thesis(row):
-    """Generates Bull Thesis, Bear Thesis, Event Triggers, and Pros/Cons."""
+    # 10. Free Cash Flow Yield
+    fcf_y = row["FCF Yield %"]
+    if fcf_y >= 5.0:
+        fcf_sig = "[🟢 STRONG]"
+        fcf_eval = f"FCF Yield of {fcf_y:.1f}% is high, proving the business generates abundant spare cash."
+    elif fcf_y >= 1.0:
+        fcf_sig = "[🟡 AVERAGE]"
+        fcf_eval = f"FCF Yield of {fcf_y:.1f}% is moderate."
+    else:
+        fcf_sig = "[🔴 WEAK]"
+        fcf_eval = f"FCF Yield of {fcf_y:.1f}% is low or negative due to heavy capital spending or cash drain."
+
+    fcf_text = f"**10. Free Cash Flow Yield (Spare Cash Power) {fcf_sig}**\n" \
+               f"- *Beginner Explanation:* Think of Free Cash Flow as the money left in your wallet after paying for your house, food, and bills. FCF Yield compares this spare cash to the company's price tag.\n" \
+               f"- *Stock Insight:* {fcf_eval}\n"
+
+    return "\n".join([mcap_text, pe_text, opm_text, roe_text, roce_text, de_text, sloan_text, alt_text, p_text, fcf_text])
+
+def generate_actionable_triggers_framework(row):
+    """
+    Generates explicit BUY / ACCUMULATE Triggers, SELL / EXIT Triggers, and Current Signal Summary tag.
+    """
     comp = row["Company"]
     is_fin = row["Is_Financial"]
     roe = row["ROE %"]
-    roce = row["ROCE %"]
     pe = row["PE"]
     de = row["D/E"]
-    opm = row["OPM %"]
     sloan = row["Sloan %"]
-    fcf_y = row["FCF Yield %"]
     p_score = row["Piotroski"]
     zone = row["Zone"]
+    fcf_y = row["FCF Yield %"]
 
-    # Bull Thesis
-    bull = f"### 🐂 The Bull Thesis (Growth Drivers & Moats)\n"
-    bull += f"1. **Capital Allocation Efficiency:** {comp} demonstrates strong compounding efficiency with an ROE of **{roe:.1f}%** and ROCE of **{roce:.1f}%**, generating attractive returns on incremental reinvested capital.\n"
-    bull += f"2. **Operational Cash Generation:** The company delivers an FCF Yield of **{fcf_y:.1f}%**, proving that earnings are translating into actual liquid cash reserves rather than remaining trapped on the balance sheet.\n"
-    bull += f"3. **Fundamental Health Momentum:** Backed by a Piotroski F-Score of **{p_score}/8**, operational trends across leverage, margin expansion, and asset turnover remain healthy."
+    # Calculate overall rating tag
+    score_points = 0
+    if roe >= 15: score_points += 1
+    if pe > 0 and pe <= 25: score_points += 1
+    if de <= 0.8 or (is_fin and de <= 7.0): score_points += 1
+    if p_score >= 6: score_points += 1
+    if fcf_y >= 3.0: score_points += 1
+    if zone == "Safe" or is_fin: score_points += 1
 
-    # Bear Thesis
-    bear = f"### 🐻 The Bear Thesis (Key Risks & Vulnerabilities)\n"
-    bear += f"1. **Valuation & Multiple Contraction Risk:** Trading at a P/E of **{pe:.1f}x**, any growth deceleration or margin compression could trigger a sharp derating in valuation multiples.\n"
-    if not is_fin and sloan is not None and sloan > 10.0:
-        bear += f"2. **Accrual & Earnings Quality Red Flag:** Sloan Accrual Ratio is elevated at **{sloan:.1f}%**, indicating a potential disconnect between accounting PAT and cash flows.\n"
+    if score_points >= 5:
+        signal_tag = "STRONG BUY"
+        tag_html = f"<div class='signal-tag-strong-buy'>🟢 OVERALL RATING: [STRONG BUY]</div>"
+    elif score_points >= 3:
+        signal_tag = "ACCUMULATE ON DIPS"
+        tag_html = f"<div class='signal-tag-accumulate'>🔵 OVERALL RATING: [ACCUMULATE ON DIPS]</div>"
+    elif score_points >= 2:
+        signal_tag = "HOLD / WATCHLIST"
+        tag_html = f"<div class='signal-tag-hold'>🟡 OVERALL RATING: [HOLD / WATCHLIST]</div>"
     else:
-        bear += f"2. **Leverage & Refinancing Exposure:** Debt-to-Equity stands at **{de:.2f}x**; sustained macro interest rate volatility could elevate interest burdens.\n"
-    bear += f"3. **Solvency & Macro Headwinds:** Solvency is categorized as **{zone}**, making macro demand shocks or raw material price inflation critical monitoring factors."
+        signal_tag = "AVOID / EXIT"
+        tag_html = f"<div class='signal-tag-avoid'>🔴 OVERALL RATING: [AVOID / EXIT]</div>"
 
-    # Event-Driven Triggers
-    buy_trig = f"**🟢 Buy / Accumulate Triggers:**\n"
-    buy_trig += f"- Debt-to-Equity ratio reducing below 0.3x or Interest Coverage expanding > 5.0x.\n"
-    buy_trig += f"- Operating Margin (OPM) expanding by > 150 bps YoY due to operating leverage.\n"
-    buy_trig += f"- Sloan Accrual Ratio dropping below 5.0% alongside positive Free Cash Flow growth.\n"
-    buy_trig += f"- Major capital expenditure (CWIP) commissioning leading to revenue acceleration."
-
-    sell_trig = f"**🔴 Avoid / Liquidation Triggers:**\n"
-    sell_trig += f"- Piotroski F-Score deteriorating below 4/8 or Altman Z-Score dropping into Distress (<1.81).\n"
-    sell_trig += f"- Uncollected receivables spike exceeding sales growth or CFO/PAT disconnect widening for 2 consecutive quarters.\n"
-    sell_trig += f"- Margin contraction > 200 bps YoY driven by loss of pricing power."
-
-    triggers = f"### ⚡ Event-Driven Catalyst & Trigger Framework\n{buy_trig}\n\n{sell_trig}"
-
-    # Pros & Cons List
-    pros = [
-        f"Delivers ROE of {roe:.1f}% and ROCE of {roce:.1f}%.",
-        f"Generates Free Cash Flow Yield of {fcf_y:.1f}%.",
-        f"Piotroski Quality Score of {p_score}/8 confirms healthy fundamental momentum.",
-        f"Revenue 3-Yr CAGR of {row['3Yr Sales CAGR %']:.1f}% demonstrating growth resilience."
+    # Actionable Triggers
+    buy_triggers = [
+        f"Buy if P/E drops below 25.0x (currently {pe:.1f}x) while ROE remains strong above 15.0%.",
+        f"Accumulate if Free Cash Flow Yield expands above 4.0% (currently {fcf_y:.1f}%), confirming high cash generation.",
+        f"Buy/Add if Piotroski Quality Score remains >= 6/8 (currently {p_score}/8) alongside debt reduction."
     ]
-    
-    cons = [
-        f"P/E valuation multiple stands at {pe:.1f}x.",
-        f"Debt-to-Equity leverage measured at {de:.2f}x.",
-        f"Solvency zone classified as {zone}.",
+
+    sell_triggers = [
+        f"Sell/Exit if Altman Z-Score falls below 1.81 into Distress Zone (currently {zone}).",
+        f"Exit if Debt-to-Equity ratio exceeds 1.5x (currently {de:.2f}x) due to unmanaged borrowing.",
+        f"Sell/Avoid if Sloan Accrual Ratio spikes above 10.0%" + (f" (currently {sloan:.1f}%)" if sloan is not None else "") + " indicating paper profit accounting disconnect."
     ]
-    if not is_fin and sloan is not None and sloan > 10.0:
-        cons.append(f"Elevated Sloan Accrual Ratio of {sloan:.1f}% indicates accounting accrual risk.")
 
-    pros_str = "\n".join([f"- ✅ {p}" for p in pros])
-    cons_str = "\n".join([f"- ⚠️ {c}" for c in cons])
+    buy_str = "\n".join([f"- 🟢 **Rule {idx+1}:** {bt}" for idx, bt in enumerate(buy_triggers)])
+    sell_str = "\n".join([f"- 🔴 **Rule {idx+1}:** {st}" for idx, st in enumerate(sell_triggers)])
 
-    pros_cons = f"### ⚖️ Granular Pros & Cons Matrix\n**Strengths & Moats:**\n{pros_str}\n\n**Vulnerabilities & Risks:**\n{cons_str}"
+    framework_md = f"### 🚦 Actionable Trading & Investment Framework for {comp}\n\n" \
+                   f"**Current Signal:** `[{signal_tag}]`\n\n" \
+                   f"#### 🎯 Exact BUY / ACCUMULATE Rules:\n{buy_str}\n\n" \
+                   f"#### ⚠️ Exact SELL / EXIT Rules:\n{sell_str}\n"
 
-    return "\n\n".join([bull, bear, triggers, pros_cons])
+    return tag_html, framework_md
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. UI & CONTROL FLOW
@@ -514,7 +643,7 @@ with st.sidebar:
     max_pe_bound = st.slider("Scatter Plot Max P/E Axis Limit", min_value=50, max_value=300, value=150, step=25, 
                              help="Clips scatter plot x-axis upper bound to prevent valuation outliers from compressing the chart.")
     st.divider()
-    st.caption(f"Institutional Terminal v3.5 | {datetime.now().year}")
+    st.caption(f"Institutional Terminal v4.0 | {datetime.now().year}")
 
 st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
 st.markdown("<p class='hero-subtitle'>Dynamic Quantitative Auditor & Multi-Asset Valuation Architecture</p>", unsafe_allow_html=True)
@@ -532,7 +661,7 @@ if uploads:
         df = pd.DataFrame(results)
         
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "📊 Matrix", "🕵️ Deep-Dive", "🏛️ Thesis & Allocation", 
+            "📊 Matrix", "💡 Beginner Translator", "🚦 Actionable Strategy", 
             "📈 Visuals", "🚨 Risk Audit", "📄 Export Report"
         ])
 
@@ -564,10 +693,10 @@ if uploads:
             )
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 2: EXPLICIT METRIC-BY-METRIC DEEP DIVE
+        # TAB 2: PLAIN-ENGLISH BEGINNER TRANSLATOR
         # ─────────────────────────────────────────────────────────────────────────
         with tab2:
-            st.subheader("Explicit Metric-by-Metric Deep Dive")
+            st.subheader("💡 Plain-English Beginner Metric Translator")
             
             kpi_col1, kpi_col2, kpi_col3 = st.columns(3)
             
@@ -593,7 +722,7 @@ if uploads:
             st.divider()
 
             selection = st.multiselect(
-                "Select Companies for Deep-Dive Analysis:", 
+                "Select Companies for Beginner Translation:", 
                 df["Company"].unique(), 
                 default=df["Company"].unique()[:min(4, len(df))]
             )
@@ -601,20 +730,22 @@ if uploads:
             if selection:
                 subset = df[df["Company"].isin(selection)]
                 for _, row in subset.iterrows():
-                    with st.expander(f"Comprehensive Metric Analysis: {row['Company']} ({row['Sector_Type']})", expanded=True):
-                        st.markdown(generate_explicit_metric_breakdown(row))
+                    with st.expander(f"Beginner Guide & Metric Signals: {row['Company']} ({row['Sector_Type']})", expanded=True):
+                        st.markdown(generate_beginner_metric_translator(row))
 
         # ─────────────────────────────────────────────────────────────────────────
-        # TAB 3: COMPREHENSIVE INVESTMENT THESIS & ALLOCATION
+        # TAB 3: ACTIONABLE BUY/SELL STRATEGY & TRIGGERS
         # ─────────────────────────────────────────────────────────────────────────
         with tab3:
-            st.subheader("🏛️ Comprehensive Investment Thesis & Allocation Strategy")
+            st.subheader("🚦 Actionable Trading & Investment Framework")
             
             if selection:
                 subset = df[df["Company"].isin(selection)]
                 for _, row in subset.iterrows():
-                    with st.expander(f"Investment Thesis & Trigger Framework: {row['Company']}", expanded=True):
-                        st.markdown(generate_comprehensive_investment_thesis(row))
+                    with st.expander(f"Trading Triggers & Signals: {row['Company']}", expanded=True):
+                        tag_html, framework_md = generate_actionable_triggers_framework(row)
+                        st.markdown(tag_html, unsafe_allow_html=True)
+                        st.markdown(framework_md)
 
         # ─────────────────────────────────────────────────────────────────────────
         # TAB 4: VISUAL ANALYTICS (PLOTLY)
@@ -743,7 +874,7 @@ if uploads:
             
             export_sub = df[df["Company"].isin(selection)] if selection else df
 
-            report = f"# INSTITUTIONAL EQUITY RESEARCH REPORT\n"
+            report = f"# INSTITUTIONAL EQUITY RESEARCH REPORT & BEGINNER GUIDE\n"
             report += f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             report += f"Total Companies Analyzed: {len(export_sub)}\n\n"
             report += "=" * 80 + "\n\n"
@@ -752,17 +883,17 @@ if uploads:
             report += dataframe_to_markdown_table(export_sub[["Company", "Sector_Type", "Market Cap", "PE", "ROE %", "ROCE %", "D/E", "Piotroski", "Zone"]])
             report += "\n\n" + "=" * 80 + "\n\n"
             
-            report += "## 2. EXPLICIT METRIC-BY-METRIC DEEP DIVES\n\n"
+            report += "## 2. PLAIN-ENGLISH BEGINNER METRIC TRANSLATOR & SIGNALS\n\n"
             for _, row in export_sub.iterrows():
                 report += f"### {row['Company']} ({row['Sector_Type']})\n\n"
-                report += generate_explicit_metric_breakdown(row)
+                report += generate_beginner_metric_translator(row)
                 report += "\n\n" + "-" * 60 + "\n\n"
             
             report += "=" * 80 + "\n\n"
-            report += "## 3. COMPREHENSIVE INVESTMENT THESES & TRIGGER FRAMEWORKS\n\n"
+            report += "## 3. ACTIONABLE BUY / SELL / HOLD STRATEGY & TRIGGERS\n\n"
             for _, row in export_sub.iterrows():
-                report += f"## {row['Company']} - INVESTMENT THESIS & STRATEGY\n\n"
-                report += generate_comprehensive_investment_thesis(row)
+                _, framework_md = generate_actionable_triggers_framework(row)
+                report += framework_md
                 report += "\n\n" + "=" * 60 + "\n\n"
 
             col_exp1, col_exp2 = st.columns(2)

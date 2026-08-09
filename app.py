@@ -37,48 +37,106 @@ def inject_custom_css():
         div[data-testid="stMetric"] {
             background-color: var(--card-bg);
             border: 1px solid var(--border-color);
-            padding: 15px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+            padding: 18px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+        div[data-testid="stMetric"]:hover {
+            border-color: var(--accent-emerald);
+            transform: translateY(-2px);
         }
         
         h1, h2, h3, h4 { 
             color: var(--text-heading) !important; 
             font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            font-weight: 700;
         }
         .hero-title {
-            font-size: 2.1rem;
+            font-size: 2.3rem;
             font-weight: 800;
             background: linear-gradient(90deg, #ffffff, #94a3b8);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            margin-bottom: 0.1rem;
+            margin-bottom: 0.2rem;
+        }
+        .hero-subtitle { 
+            color: #8b949e; 
+            font-size: 1.05rem; 
+            margin-bottom: 1.8rem; 
         }
         
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+        .stTabs [data-baseweb="tab-list"] { 
+            gap: 10px; 
+            border-bottom: 1px solid var(--border-color);
+        }
         .stTabs [data-baseweb="tab"] {
             background-color: var(--card-bg);
-            border-radius: 4px 4px 0 0;
-            padding: 8px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px 6px 0px 0px;
+            padding: 10px 24px;
+            color: var(--text-main);
+            font-weight: 600;
+        }
+        .stTabs [aria-selected="true"] {
+            background-color: var(--accent-emerald) !important;
+            color: #ffffff !important;
+            border-color: var(--accent-emerald) !important;
         }
         
-        .level-badge {
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
+        .sector-badge {
+            background-color: #1e293b;
+            color: #38bdf8;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border: 1px solid #0284c7;
         }
-        .badge-beginner { background-color: #065f46; color: #a7f3d0; }
-        .badge-intermediate { background-color: #1e3a8a; color: #bfdbfe; }
-        .badge-pro { background-color: #701a75; color: #f5d0fe; }
-
-        .metric-card {
-            background: var(--card-bg);
-            padding: 1.2rem;
-            border-radius: 10px;
-            border: 1px solid var(--border-color);
-            margin-bottom: 1rem;
+        
+        .signal-tag-strong-buy {
+            background-color: rgba(16, 185, 129, 0.2);
+            color: #10b981;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #10b981;
+            display: inline-block;
+            margin-bottom: 12px;
+        }
+        .signal-tag-accumulate {
+            background-color: rgba(59, 130, 246, 0.2);
+            color: #3b82f6;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #3b82f6;
+            display: inline-block;
+            margin-bottom: 12px;
+        }
+        .signal-tag-hold {
+            background-color: rgba(245, 158, 11, 0.2);
+            color: #f59e0b;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #f59e0b;
+            display: inline-block;
+            margin-bottom: 12px;
+        }
+        .signal-tag-avoid {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            font-weight: 800;
+            border: 1px solid #ef4444;
+            display: inline-block;
+            margin-bottom: 12px;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -86,34 +144,42 @@ def inject_custom_css():
 inject_custom_css()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. QUANT ENGINE: CORE CALCULATIONS (RETAINED)
+# 2. QUANT ENGINE: SAFE MATH & FINANCIAL SECTOR PARSING
 # ─────────────────────────────────────────────────────────────────────────────
 
 def safe_float(val, default=0.0):
-    if val is None: return default
+    if val is None: 
+        return default
     try:
-        if isinstance(val, (int, float)): return float(val)
+        if isinstance(val, (int, float)): 
+            return float(val)
         s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
-        if s.startswith('(') and s.endswith(')'): s = "-" + s[1:-1]
+        if s.startswith('(') and s.endswith(')'): 
+            s = "-" + s[1:-1]
         return float(s) if s != '' else default
-    except: return default
+    except: 
+        return default
 
 def safe_div(n, d, default=0.0):
     try:
         n_f = float(n) if n is not None else 0.0
         d_f = float(d) if d is not None else 0.0
         return n_f / d_f if d_f != 0 else default
-    except: return default
+    except: 
+        return default
 
 def calculate_cagr(series, years):
     clean_series = [s for s in series if s is not None]
-    if not clean_series or len(clean_series) < years + 1: return 0.0
+    if not clean_series or len(clean_series) < years + 1: 
+        return 0.0
     try:
         start_val = clean_series[-(years + 1)]
         end_val = clean_series[-1]
-        if start_val <= 0 or end_val <= 0: return 0.0
+        if start_val <= 0 or end_val <= 0: 
+            return 0.0
         return ((end_val / start_val) ** (1 / years) - 1) * 100
-    except: return 0.0
+    except: 
+        return 0.0
 
 def find_row_series(ws, keywords):
     kw_lower = [k.lower() for k in keywords]
@@ -124,273 +190,314 @@ def find_row_series(ws, keywords):
             series = []
             for c in range(2, ws.max_column + 1):
                 val = ws.cell(row=row_idx, column=c).value
-                series.append(safe_float(val, None))
-            return series
+                if val is not None:
+                    series.append(safe_float(val, None))
+            if series:
+                return series
     return None
 
 def detect_financial_entity(ws, filename, extracted_name, raw_data):
-    fin_keywords = ["bank", "nbfc", "advances", "deposits", "interest earned", "nii", "provisions"]
+    fin_keywords = [
+        "bank", "nbfc", "advances", "deposits", "interest earned", "interest expended", 
+        "net interest income", "nii", "provisions & contingencies", "gross npa", 
+        "net npa", "capital adequacy", "housing finance", "microfinance"
+    ]
+    
     ws_text_sample = ""
-    for r in range(1, min(30, ws.max_row + 1)):
+    for r in range(1, min(40, ws.max_row + 1)):
         for c in range(1, min(4, ws.max_column + 1)):
-            if ws.cell(row=r, column=c).value: ws_text_sample += f" {str(ws.cell(row=r, column=c).value).lower()}"
-    if any(kw in ws_text_sample for kw in fin_keywords): return True
+            val = ws.cell(row=r, column=c).value
+            if val:
+                ws_text_sample += f" {str(val).lower()}"
+                
+    if any(kw in ws_text_sample for kw in fin_keywords):
+        return True
+
     combined_name = f"{extracted_name} {filename}".lower()
-    if any(term in combined_name for term in ["bank", "finance", "fin", "nbfc", "capital"]): return True
+    name_fin_terms = ["bank", "finance", "fin", "nbfc", "capital", "housing fin", "lending"]
+    if any(term in combined_name for term in name_fin_terms):
+        return True
+
     return False
 
 def process_workbook(file_bytes, filename):
     try:
+        res = {}
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
         ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), wb.sheetnames[0])
         ws = wb[ds_name]
+
         extracted_name = ws.cell(row=1, column=2).value
-        company_name = str(extracted_name).strip() if extracted_name else str(filename).replace(".xlsx", "")
-        
+        company_name = str(extracted_name).strip() if extracted_name else str(filename).replace(".xlsx", "").replace(".xls", "")
+        res["Company"] = company_name
+
         data_map = {
             "mcap": ["Market Capitalization", "Market Cap"],
-            "sales": ["Sales", "Revenue", "Interest Earned"],
-            "op": ["Operating Profit", "EBITDA"],
-            "pat": ["Net Profit", "PAT"],
+            "sales": ["Sales", "Revenue", "Interest Earned", "Total Revenue", "Gross Revenue"],
+            "op": ["Operating Profit", "EBITDA", "EBIT", "Operating Profit / (Loss)"],
+            "pat": ["Net Profit", "Profit after tax", "PAT"],
             "pbt": ["Profit before tax", "PBT"],
             "interest": ["Interest", "Finance Costs"],
-            "debt": ["Borrowings", "Total Debt"],
+            "depr": ["Depreciation", "Depreciation & Amortization"],
+            "debt": ["Borrowings", "Total Debt", "Debt"],
             "equity": ["Equity Share Capital", "Share Capital"],
             "reserves": ["Reserves", "Other Equity"],
-            "cfo": ["Cash from Operating", "CFO"],
-            "cfi": ["Cash from Investing", "CFI"],
-            "capex": ["Capital Expenditure", "Purchase of fixed assets"],
+            "cfo": ["Cash from Operating", "CFO", "Cash flow from operating activities"],
+            "cfi": ["Cash from Investing", "CFI", "Cash flow from investing activities"],
+            "capex": ["Capital Expenditure", "Fixed Assets Purchased", "CapEx", "Purchase of fixed assets"],
             "cwip": ["Capital Work in Progress", "CWIP"],
-            "net_block": ["Net Block", "Fixed Assets"],
+            "net_block": ["Net Block", "Fixed Assets", "Property Plant and Equipment"],
+            "liab": ["Other Liabilities", "Total Liabilities", "Current Liabilities"],
             "assets": ["Total Assets"],
-            "receivables": ["Receivables"],
-            "inventory": ["Inventory"]
+            "receivables": ["Receivables", "Trade Receivables"],
+            "inventory": ["Inventory", "Inventories"]
         }
 
         raw = {k: find_row_series(ws, v) for k, v in data_map.items()}
         curr = {k: (raw[k][-1] if raw[k] and raw[k][-1] is not None else 0.0) for k in raw}
-        is_fin = detect_financial_entity(ws, filename, company_name, raw)
         
+        is_fin = detect_financial_entity(ws, filename, company_name, raw)
+        res["Is_Financial"] = is_fin
+        res["Sector_Type"] = "Financial / Banking" if is_fin else "Industrial / Commercial"
+
         local_equity = curr['equity'] + curr['reserves']
         local_debt = curr['debt']
-        local_assets = curr['assets'] if curr['assets'] > 0 else (local_equity + local_debt)
+        local_assets = curr['assets'] if curr['assets'] > 0 else (local_equity + local_debt + curr['liab'])
         local_pat = curr['pat']
+        local_pbt = curr['pbt'] if curr['pbt'] != 0 else local_pat
+        local_cfo = curr['cfo']
         local_sales = curr['sales']
+        local_mcap = curr['mcap']
         
-        res = {"Company": company_name, "Is_Financial": is_fin, "Sector_Type": "Financial" if is_fin else "Industrial"}
-        res["Market Cap"] = curr['mcap']
+        raw_capex = curr['capex']
+        if raw_capex > 0:
+            capex_val = raw_capex
+        elif curr['cfi'] != 0:
+            capex_val = abs(curr['cfi'])
+        else:
+            capex_val = 0.0
+
+        fcf_val = local_cfo - capex_val
+        res["CapEx"] = capex_val
+        res["FCF"] = fcf_val
+        res["FCF Yield %"] = safe_div(fcf_val, local_mcap) * 100
+
+        if is_fin:
+            local_ebit = local_pbt if local_pbt != 0 else local_pat
+            res["Interest Coverage"] = None
+        else:
+            local_ebit = (curr['pbt'] + curr['interest']) if (curr['pbt'] != 0 or curr['interest'] != 0) else curr['op']
+            res["Interest Coverage"] = safe_div(local_ebit, curr['interest'], default=999.0) if curr['interest'] > 0 else 999.0
+
+        res["Market Cap"] = local_mcap
         res["Sales"] = local_sales
         res["Net Profit"] = local_pat
-        res["PE"] = safe_div(curr['mcap'], local_pat) if local_pat > 0 else -1.0
-        res["EV/EBITDA"] = safe_div(curr['mcap'] + local_debt, curr['op']) if curr['op'] > 0 else -1.0
+        res["PE"] = safe_div(local_mcap, local_pat) if local_pat > 0 else -1.0
+        
+        # EV/EBITDA Calculation
+        ev = local_mcap + local_debt
+        ebitda = curr['op'] if curr['op'] > 0 else local_ebit
+        res["EV/EBITDA"] = safe_div(ev, ebitda) if ebitda > 0 else -1.0
+
         res["D/E"] = safe_div(local_debt, local_equity)
-        res["ROE %"] = safe_div(local_pat, local_equity) * 100
-        res["ROCE %"] = safe_div(curr['op'], local_equity + local_debt) * 100
-        res["Interest Coverage"] = safe_div(curr['op'], curr['interest']) if curr['interest'] > 0 else 999.0
+        
+        if is_fin:
+            res["OPM %"] = safe_div(local_pat, local_sales) * 100
+            res["ROE %"] = safe_div(local_pat, local_equity) * 100
+            res["ROCE %"] = safe_div(local_ebit, local_equity + local_debt) * 100
+        else:
+            res["OPM %"] = safe_div(curr['op'], local_sales) * 100
+            res["ROE %"] = safe_div(local_pat, local_equity) * 100
+            res["ROCE %"] = safe_div(local_ebit, local_equity + local_debt) * 100
+
+        res["CWIP to Net Block %"] = safe_div(curr['cwip'], curr['net_block']) * 100 if curr['net_block'] > 0 else 0.0
         res["3Yr Sales CAGR %"] = calculate_cagr(raw['sales'], 3)
         res["3Yr PAT CAGR %"] = calculate_cagr(raw['pat'], 3)
-        res["FCF"] = curr['cfo'] - abs(curr['cfi'] if curr['cfi'] < 0 else curr['capex'])
-        res["FCF Yield %"] = safe_div(res["FCF"], curr['mcap']) * 100
-        res["Sloan %"] = safe_div(local_pat - curr['cfo'], local_assets) * 100
-        res["CWIP to Net Block %"] = safe_div(curr['cwip'], curr['net_block']) * 100
         
-        # Altman Z
-        if not is_fin:
-            wc = (curr['receivables'] + curr['inventory']) - (local_assets * 0.1) # Proxy WC
-            z = (1.2 * safe_div(wc, local_assets)) + (1.4 * safe_div(curr['reserves'], local_assets)) + \
-                (3.3 * safe_div(curr['op'], local_assets)) + (0.6 * safe_div(curr['mcap'], local_debt)) + \
-                (0.99 * safe_div(local_sales, local_assets))
-            res["Altman Z"] = z
-            res["Zone"] = "Safe" if z > 2.99 else "Grey" if z >= 1.81 else "Distress"
+        if is_fin:
+            res["Sloan %"] = None
         else:
-            res["Altman Z"], res["Zone"] = None, "N/A"
+            res["Sloan %"] = safe_div(local_pat - local_cfo, local_assets) * 100
 
-        # Piotroski
-        p = 0
-        if local_pat > 0: p += 1
-        if curr['cfo'] > 0: p += 1
-        if curr['cfo'] > local_pat: p += 1
-        if res["3Yr PAT CAGR %"] > 0: p += 1
-        if res["D/E"] < 1.0: p += 1
-        if res["ROE %"] > 15: p += 1
-        if res["3Yr Sales CAGR %"] > 0: p += 1
-        if local_assets > 0: p += 1
-        res["Piotroski"] = p
+        if is_fin:
+            res["Altman Z"] = None
+            res["Zone"] = "N/A (Financial)"
+        else:
+            wc_proxy = (curr['receivables'] + curr['inventory'] + (local_assets * 0.05)) - curr['liab']
+            z_val = (
+                (1.2 * safe_div(wc_proxy, local_assets)) + 
+                (1.4 * safe_div(curr['reserves'], local_assets)) + 
+                (3.3 * safe_div(curr['op'], local_assets)) + 
+                (0.6 * safe_div(local_mcap, local_debt + curr['liab'])) + 
+                (0.99 * safe_div(local_sales, local_assets))
+            )
+            res["Altman Z"] = z_val
+            res["Zone"] = "Safe" if z_val > 2.99 else "Grey" if z_val >= 1.81 else "Distress"
+
+        p_score = 0
+        if local_pat > 0: p_score += 1
+        if local_cfo > 0: p_score += 1
+        if local_cfo > local_pat: p_score += 1
+        if res["3Yr PAT CAGR %"] > 0: p_score += 1
+        
+        if raw['debt'] and len(raw['debt']) > 1 and raw['equity'] and len(raw['equity']) > 1 and raw['reserves'] and len(raw['reserves']) > 1:
+            prev_eq = (raw['equity'][-2] or 0.0) + (raw['reserves'][-2] or 0.0)
+            prev_de = safe_div(raw['debt'][-2], prev_eq)
+            if res["D/E"] <= prev_de: p_score += 1
+            
+        if res["ROCE %"] > 12: p_score += 1
+        if res["3Yr Sales CAGR %"] > 0: p_score += 1
+        if local_assets > 0: p_score += 1
+        res["Piotroski"] = p_score
 
         return res, file_bytes
+
     except Exception as e:
-        st.error(f"Error parsing {filename}: {e}")
+        err_msg = f"Error in {filename}: {str(e)}\n{traceback.format_exc()}"
+        st.error(err_msg)
         return None, None
 
+def dataframe_to_markdown_table(df_sub):
+    headers = list(df_sub.columns)
+    header_row = "| " + " | ".join(headers) + " |"
+    sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
+    data_rows = []
+    for _, row in df_sub.iterrows():
+        r_str = [str(val) for val in row.values]
+        data_rows.append("| " + " | ".join(r_str) + " |")
+    return "\n".join([header_row, sep_row] + data_rows)
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. QUALITATIVE GENERATORS: 3-TIER ARCHITECTURE
+# 3. EXTREME PLAIN-ENGLISH TRANSLATOR & LIMITATIONS ENGINE (ALL 12 METRICS)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_benchmark_badge(val, metric_type):
-    thresholds = {
-        "ROE %": (18, 12), "ROCE %": (15, 10), "Piotroski": (6, 4), 
-        "D/E": (0.5, 1.2), "PE": (15, 35), "FCF Yield %": (5, 2)
-    }
-    if metric_type not in thresholds: return ""
-    high, mid = thresholds[metric_type]
-    if metric_type in ["D/E", "PE"]: # Lower is better
-        if val <= high: return "[🟢 STRONG]"
-        if val <= mid: return "[🟡 AVERAGE]"
-        return "[🔴 WEAK]"
-    else: # Higher is better
-        if val >= high: return "[🟢 STRONG]"
-        if val >= mid: return "[🟡 AVERAGE]"
-        return "[🔴 WEAK]"
-
-def render_metric_logic(row, metric_key, level):
-    val = row[metric_key]
+def generate_extreme_beginner_translator(row):
+    """
+    Generates Real-World Analogy, Benchmark Tag, What It Means For This Stock,
+    and When This Metric Could Be WRONG (Limitations) for ALL 12 Financial Metrics.
+    """
+    comp = row["Company"]
     is_fin = row["Is_Financial"]
     
-    content = {
-        "PE": {
-            "Beginner": f"**Analogy:** The price tag per ₹1 of profit. \n- **Status:** {get_benchmark_badge(val, 'PE')} \n- **Meaning:** You pay ₹{val:.1f} for every ₹1 the company earns. \n- **The Lie:** A 'cheap' low PE might mean the business is dying.",
-            "Intermediate": f"Trading at {val:.1f}x earnings. Relative to sector peers, this multiple reflects { 'a premium' if val > 25 else 'value' } orientation.",
-            "Pro": f"**Formula:** Market Cap / PAT. \n- Current: {val:.1f}x. \n- Yield Equiv: {safe_div(1, val)*100:.2f}%."
-        },
-        "ROE %": {
-            "Beginner": f"**Analogy:** The interest rate the company earns on its own money. \n- **Status:** {get_benchmark_badge(val, 'ROE %')} \n- **Meaning:** For every ₹100 of its own cash, it generates ₹{val:.1f} profit. \n- **The Lie:** High ROE can be faked by taking massive, dangerous bank loans.",
-            "Intermediate": f"Return on Equity is {val:.1f}%. This indicates efficient internal compounding of shareholder capital.",
-            "Pro": f"**DuPont Component:** {val:.1f}%. Reflects Net Margin x Asset Turnover x Equity Multiplier."
-        },
-        "Sloan %": {
-            "Beginner": f"**Analogy:** The 'Real Cash' detector. \n- **Meaning:** { 'Profits are backed by real cash' if val < 10 else 'Warning: Profits might just be paper promises' }. \n- **The Lie:** Growing companies sometimes have high accruals naturally during expansion.",
-            "Intermediate": f"Sloan Ratio: {val:.1f}%. { 'Earnings quality is high.' if val < 10 else 'Potential accrual accounting inflation detected.' }",
-            "Pro": f"**Accrual Math:** (NI - CFO) / Total Assets. Current: {val:.1f}%. Threshold > 10% indicates aggressive revenue recognition."
-        }
-    }
-    return content.get(metric_key, {}).get(level.split()[1], "Metric data unavailable for this level.")
-
-def render_thesis_content(row, level):
-    comp = row["Company"]
-    if "Beginner" in level:
-        return f"### ⚖️ Simple Pros & Cons\n**Pros:**\n- 🟢 Strong {row['Piotroski']}/8 quality score.\n- 🟢 Generates ₹{row['FCF']:.0f}Cr in spare cash.\n\n**Cons:**\n- 🔴 Debt is {row['D/E']:.2f}x its own cash.\n- 🔴 P/E of {row['PE']:.1f} is { 'expensive' if row['PE']>30 else 'fair' }."
-    elif "Intermediate" in level:
-        return f"### 🐂 Bull vs 🐻 Bear\n**Bull Case:** Capital efficiency (ROCE: {row['ROCE %']:.1f}%) suggests a wide moat. 3Yr Sales growth of {row['3Yr Sales CAGR %']:.1f}% shows momentum.\n\n**Bear Case:** Sloan ratio of {row['Sloan %']:.1f}% indicates { 'potential earnings quality issues.' if row['Sloan %']>10 else 'no major red flags.' }"
+    # 1. Market Capitalization
+    mcap = row["Market Cap"]
+    if mcap >= 50000:
+        mcap_tag = "[🟢 STRONG]"
+        mcap_stock = f"₹{mcap:,.0f} Cr classifies {comp} as a Large-Cap titan with high market liquidity."
+    elif mcap >= 15000:
+        mcap_tag = "[🟡 AVERAGE]"
+        mcap_stock = f"₹{mcap:,.0f} Cr makes {comp} a Mid-Cap business with a balance of growth and stability."
     else:
-        return f"### 🏛️ Institutional Risk Matrix\n- **Forensic:** Altman Z ({row['Altman Z'] if row['Altman Z'] else 'N/A'}) puts entity in {row['Zone']} zone.\n- **Capital:** Interest coverage at {row['Interest Coverage']:.1f}x.\n- **Valuation:** EV/EBITDA of {row['EV/EBITDA']:.1f}x relative to {row['3Yr PAT CAGR %']:.1f}% growth."
+        mcap_tag = "[🟡 AVERAGE]"
+        mcap_stock = f"₹{mcap:,.0f} Cr places {comp} as a Small-Cap with high growth potential but higher stock volatility."
+    mcap_text = f"#### 1. Market Capitalization (Company Size Tag) {mcap_tag}\n" \
+                f"- 💡 **Real-World Analogy:** Think of Market Cap as the total price tag to buy 100% of the company's shares today.\n" \
+                f"- 🔍 **What It Means For {comp}:** {mcap_stock}\n" \
+                f"- ⚠️ **When This Metric Can LIE:** Large cap doesn't automatically mean safe; giant companies can still stagnate or decline if their core market disrupts.\n"
 
-def render_action_triggers(row, level):
-    if "Beginner" in level:
-        return f"**When to Buy:** If the stock price drops and P/E goes below 20.\n\n**When to Sell:** If the business starts losing money or debt doubles."
-    elif "Intermediate" in level:
-        return f"**Entry Trigger:** Accumulate on 10% dips if ROE remains > 15%.\n\n**Exit Trigger:** Structural decline in OPM % or Sloan Ratio exceeding 15%."
+    # 2. P/E Ratio
+    pe = row["PE"]
+    if pe > 0:
+        if pe <= 20:
+            pe_tag = "[🟢 STRONG]"
+            pe_stock = f"P/E is {pe:.1f}x, meaning you pay ₹{pe:.1f} for every ₹1 of annual profit."
+        elif pe <= 40:
+            pe_tag = "[🟡 AVERAGE]"
+            pe_stock = f"P/E is moderate at {pe:.1f}x, reflecting standard growth expectations."
+        else:
+            pe_tag = "[🔴 WEAK]"
+            pe_stock = f"P/E is high at {pe:.1f}x, pricing in aggressive growth expectations."
     else:
-        return f"**Allocation:** Core position if FCF Yield > 5% and Piotroski >= 7.\n\n**Catalyst Watch:** CWIP at {row['CWIP to Net Block %']:.1f}% - monitor for commissioning."
+        pe_tag = "[🔴 WEAK]"
+        pe_stock = "P/E is negative because the company reported a net loss recently."
+    pe_text = f"#### 2. P/E Ratio (Price-to-Earnings Multiple) {pe_tag}\n" \
+              f"- 💡 **Real-World Analogy:** Think of P/E as how many years of current profit it takes to pay back your stock purchase price.\n" \
+              f"- 🔍 **What It Means For {comp}:** {pe_stock}\n" \
+              f"- ⚠️ **When This Metric Can LIE (Value Trap):** A super-low P/E (e.g. 4x) looks cheap but can be a 'Value Trap' if earnings are about to collapse or belong to a dying industry.\n"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. MAIN INTERFACE
-# ─────────────────────────────────────────────────────────────────────────────
+    # 3. EV/EBITDA
+    eve = row["EV/EBITDA"]
+    if eve > 0:
+        if eve <= 12:
+            eve_tag = "[🟢 STRONG]"
+            eve_stock = f"EV/EBITDA is attractive at {eve:.1f}x, taking debt and cash into valuation account."
+        elif eve <= 22:
+            eve_tag = "[🟡 AVERAGE]"
+            eve_stock = f"EV/EBITDA is fair at {eve:.1f}x."
+        else:
+            eve_tag = "[🔴 WEAK]"
+            eve_stock = f"EV/EBITDA is high at {eve:.1f}x."
+    else:
+        eve_tag = "[🔴 WEAK]"
+        eve_stock = "EV/EBITDA is N/A due to negative cash earnings."
+    eve_text = f"#### 3. EV/EBITDA (Acquisition Price Multiple) {eve_tag}\n" \
+               f"- 💡 **Real-World Analogy:** Think of EV/EBITDA as buying a house including taking over its mortgage minus cash left in its safe, divided by annual rent.\n" \
+               f"- 🔍 **What It Means For {comp}:** {eve_stock}\n" \
+               f"- ⚠️ **When This Metric Can LIE:** Ignores heavy physical machinery replacement costs (Depreciation); high CapEx companies can look deceptively cheap on EBITDA.\n"
 
-with st.sidebar:
-    st.markdown("<h2 style='margin-top:0;'>⚙️ Control Panel</h2>", unsafe_allow_html=True)
-    level = st.sidebar.radio("Select Analysis Complexity:", ["🌱 Beginner Investor", "📈 Intermediate Investor", "🏛️ Pro / Institutional Analyst"])
-    st.divider()
-    uploads = st.file_uploader("Upload Screener Excels", type=["xlsx"], accept_multiple_files=True)
-    st.divider()
-    st.caption(f"Terminal v6.0 | {datetime.now().strftime('%Y-%m-%d')}")
+    # 4. Operating Profit Margin (OPM %)
+    opm = row["OPM %"]
+    if is_fin:
+        opm_name = "Net Margin (Banking Profitability)"
+        if opm >= 20: opm_tag = "[🟢 STRONG]"
+        elif opm >= 10: opm_tag = "[🟡 AVERAGE]"
+        else: opm_tag = "[🔴 WEAK]"
+        opm_stock = f"Net margin is {opm:.1f}%, capturing credit spread efficiency after provisions."
+    else:
+        opm_name = "Operating Profit Margin (OPM %)"
+        if opm >= 18: opm_tag = "[🟢 STRONG]"
+        elif opm >= 10: opm_tag = "[🟡 AVERAGE]"
+        else: opm_tag = "[🔴 WEAK]"
+        opm_stock = f"OPM is {opm:.1f}%, keeping ₹{opm:.1f} as operating profit out of every ₹100 sold."
+    opm_text = f"#### 4. {opm_name} {opm_tag}\n" \
+               f"- 💡 **Real-World Analogy:** Think of OPM as how many dollars a store owner keeps after paying rent, electricity, and inventory out of every $100 in sales.\n" \
+               f"- 🔍 **What It Means For {comp}:** {opm_stock}\n" \
+               f"- ⚠️ **When This Metric Can LIE:** A temporarily high OPM might be inflated by one-off commodity price spikes that quickly reverse.\n"
 
-st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
+    # 5. Return on Equity (ROE %)
+    roe = row["ROE %"]
+    if roe >= 18: roe_tag = "[🟢 STRONG]"
+    elif roe >= 12: roe_tag = "[🟡 AVERAGE]"
+    else: roe_tag = "[🔴 WEAK]"
+    roe_stock = f"ROE of {roe:.1f}% demonstrates efficiency in generating profit from shareholder equity."
+    roe_text = f"#### 5. Return on Equity (ROE %) {roe_tag}\n" \
+               f"- 💡 **Real-World Analogy:** Think of ROE as how many interest dollars your savings account gives you per $100 of your own money deposited.\n" \
+               f"- 🔍 **What It Means For {comp}:** {roe_stock}\n" \
+               f"- ⚠️ **When This Metric Can LIE (Leverage Trick):** A company can artificially inflate ROE by taking on dangerous bank debt, which shrinks equity while risking bankruptcy.\n"
 
-if uploads:
-    results, raw_files = [], []
-    for up in uploads:
-        data, b_content = process_workbook(up.getvalue(), up.name)
-        if data:
-            results.append(data)
-            raw_files.append((up.name, b_content))
+    # 6. Return on Capital Employed (ROCE %)
+    roce = row["ROCE %"]
+    if roce >= 15: roce_tag = "[🟢 STRONG]"
+    elif roce >= 10: roce_tag = "[🟡 AVERAGE]"
+    else: roce_tag = "[🔴 WEAK]"
+    roce_stock = f"ROCE of {roce:.1f}% measures total profit return generated from all funds (equity + debt)."
+    roce_text = f"#### 6. Return on Capital Employed (ROCE %) {roce_tag}\n" \
+                f"- 💡 **Real-World Analogy:** Think of ROCE as how much profit a factory generates using both the owner's money AND the bank loan combined.\n" \
+                f"- 🔍 **What It Means For {comp}:** {roce_stock}\n" \
+                f"- ⚠️ **When This Metric Can LIE:** Old, fully depreciated factories can make ROCE look artificially high because book asset values look tiny.\n"
 
-    if results:
-        df = pd.DataFrame(results)
-        
-        # 1. Top Level KPI Badges
-        st.subheader("🏆 Cohort Leaders")
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Top ROE", df.loc[df['ROE %'].idxmax()]['Company'], f"{df['ROE %'].max():.1f}%")
-        k2.metric("Best Quality", df.loc[df['Piotroski'].idxmax()]['Company'], f"Score {df['Piotroski'].max()}")
-        k3.metric("FCF King", df.loc[df['FCF Yield %'].idxmax()]['Company'], f"{df['FCF Yield %'].max():.1f}%")
-        safe_z = df[df['Altman Z'].notnull()]
-        if not safe_z.empty:
-            k4.metric("Safest Solvency", safe_z.loc[safe_z['Altman Z'].idxmax()]['Company'], f"Z {safe_z['Altman Z'].max():.2f}")
+    # 7. Debt-to-Equity (D/E)
+    de = row["D/E"]
+    if is_fin:
+        de_tag = "[🟢 STRONG]" if de <= 6.0 else ("[🟡 AVERAGE]" if de <= 8.5 else "[🔴 WEAK]")
+        de_stock = f"Banking D/E is {de:.2f}x, within standard financial leverage bounds for deposit-taking institutions."
+    else:
+        de_tag = "[🟢 STRONG]" if de <= 0.5 else ("[🟡 AVERAGE]" if de <= 1.2 else "[🔴 WEAK]")
+        de_stock = f"D/E leverage stands at {de:.2f}x."
+    de_text = f"#### 7. Debt-to-Equity Ratio (Borrowing Risk) {de_tag}\n" \
+              f"- 💡 **Real-World Analogy:** Think of D/E as comparing your credit card debt to cash in your savings account.\n" \
+              f"- 🔍 **What It Means For {comp}:** {de_stock}\n" \
+              f"- ⚠️ **When This Metric Can LIE:** Capital-intensive utility/infrastructure companies naturally operate with high D/E safely due to long-term government contracts.\n"
 
-        # 2. Comparative Matrix
-        with st.expander("📊 Full Quantitative Matrix (Raw Data)", expanded=False):
-            st.dataframe(df.drop(columns=["Is_Financial"]), use_container_width=True)
-
-        st.divider()
-        
-        # 3. Tabbed Deep-Dive
-        selection = st.multiselect("Select Companies for Deep Analysis:", df["Company"].unique(), default=df["Company"].unique()[:2])
-        
-        if selection:
-            t1, t2, t3, t4 = st.tabs(["📊 Metric Deep-Dive", "🏛️ Bull & Bear Thesis", "🚦 Action Triggers", "🛡️ Risk Auditor"])
-            
-            sub = df[df["Company"].isin(selection)]
-            
-            with t1:
-                for _, row in sub.iterrows():
-                    st.markdown(f"### {row['Company']} <span class='level-badge badge-{'beginner' if 'Beginner' in level else 'intermediate' if 'Intermediate' in level else 'pro'}'>{level}</span>", unsafe_allow_html=True)
-                    e1, e2, e3 = st.columns(3)
-                    with e1:
-                        with st.expander("💎 Valuation & Pricing", expanded=True):
-                            st.write(render_metric_logic(row, "PE", level))
-                    with e2:
-                        with st.expander("⚡ Capital & Cash", expanded=True):
-                            st.write(render_metric_logic(row, "ROE %", level))
-                    with e3:
-                        with st.expander("🛡️ Quality & Accruals", expanded=True):
-                            st.write(render_metric_logic(row, "Sloan %", level))
-                    st.divider()
-
-            with t2:
-                cols = st.columns(len(sub))
-                for i, (_, row) in enumerate(sub.iterrows()):
-                    with cols[i]:
-                        st.markdown(f"#### {row['Company']}")
-                        st.info(render_thesis_content(row, level))
-
-            with t3:
-                cols = st.columns(len(sub))
-                for i, (_, row) in enumerate(sub.iterrows()):
-                    with cols[i]:
-                        st.markdown(f"#### {row['Company']}")
-                        st.success(render_action_triggers(row, level))
-
-            with t4:
-                for _, row in sub.iterrows():
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.write(f"**{row['Company']}**")
-                    c2.write(f"Altman Zone: **{row['Zone']}**")
-                    c3.write(f"Piotroski: **{row['Piotroski']}/8**")
-                    c4.write(f"D/E: **{row['D/E']:.2f}**")
-                    if not row['Is_Financial'] and row['Sloan %'] > 10: st.error("🚨 FORENSIC ALERT: High Accrual Ratio detected.")
-                    if row['Interest Coverage'] < 2: st.warning("⚠️ SOLVENCY ALERT: Low Interest Coverage.")
-                    st.divider()
-
-        # 4. Visuals (Retained)
-        st.subheader("📈 Visual Intelligence")
-        vc1, vc2 = st.columns(2)
-        with vc1:
-            fig = px.scatter(df, x="PE", y="ROE %", size="Market Cap", color="Sector_Type", hover_name="Company", title="ROE vs Valuation")
-            st.plotly_chart(fig, use_container_width=True)
-        with vc2:
-            fig2 = px.bar(df, x="Company", y="Piotroski", color="Piotroski", title="Quality Scores")
-            st.plotly_chart(fig2, use_container_width=True)
-
-        # 5. Export Report
-        st.divider()
-        report = f"# Research Report: {level}\nGenerated: {datetime.now()}\n\n"
-        for _, row in sub.iterrows():
-            report += f"## {row['Company']}\n"
-            report += f"{render_thesis_content(row, level)}\n\n"
-            report += f"### Action Plan\n{render_action_triggers(row, level)}\n\n"
-            report += "---\n"
-        
-        st.download_button("📥 Export Dynamic Report (.md)", data=report, file_name=f"Report_{level.split()[1]}.md")
-
-else:
-    st.info("👋 Upload Excel files in the sidebar to begin analysis.")
+    # 8. Interest Coverage Ratio
+    ic = row["Interest Coverage"]
+    if is_fin or ic is None:
+        ic_tag = "[🟢 STRONG]"
+        ic_stock = "Interest coverage is N/A for banks where interest is an operating cost."
+    else:
+        ic_val = ic if isinstance(ic, (int, float)) else 999
+        ic_tag = "[🟢 STRONG]" if ic_val >= 4.0 else ("[🟡 AVERAGE]" if ic_val >= 2.0 else "[🔴 WEAK]")
+        ic_stock = f"Interest Coverage stands at {ic_val:.1f}x operating profit."
+    ic_text = f"#### 8. Interest Coverage Ratio (Debt Paydown Buffer) {ic_tag}\n" \
+              f"- 💡 **Real-World Analogy:** Think of Interest Coverage as how many times over your monthly salary can pay your mortgage interest installment.\n" \
+              f"-

@@ -1,6 +1,15 @@
+import sys
+import subprocess
+
+# Auto-install yfinance if missing in Streamlit Cloud environment
+try:
+    import yfinance as yf
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance"])
+    import yfinance as yf
+
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
@@ -44,7 +53,7 @@ def fetch_stock_data(symbol):
     try:
         ticker = yf.Ticker(symbol)
         info = ticker.info
-        if not info or 'shortName' not in info:
+        if not info or ('shortName' not in info and 'longName' not in info):
             return None
             
         financials = ticker.financials
@@ -57,7 +66,7 @@ def fetch_stock_data(symbol):
         
         total_debt = info.get('totalDebt', 0.0)
         total_equity = info.get('totalStockholderEquity', 0.0)
-        if not total_equity and 'Stockholders Equity' in balance_sheet.index:
+        if not total_equity and not balance_sheet.empty and 'Stockholders Equity' in balance_sheet.index:
             total_equity = balance_sheet.loc['Stockholders Equity'].iloc[0]
             
         de_ratio = safe_div(total_debt, total_equity)
@@ -85,7 +94,7 @@ def fetch_stock_data(symbol):
         if fcf > 0: p_score += 1
         
         return {
-            "Company": info.get('shortName', symbol),
+            "Company": info.get('shortName', info.get('longName', symbol)),
             "Symbol": symbol.upper(),
             "Sector": sector,
             "Is_Financial": is_fin,
@@ -97,7 +106,7 @@ def fetch_stock_data(symbol):
             "Piotroski": p_score,
             "Price": info.get('currentPrice', info.get('navPrice', 0.0))
         }
-    except Exception as e:
+    except Exception:
         return None
 
 with st.sidebar:

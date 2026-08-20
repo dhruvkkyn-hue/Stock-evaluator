@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
 
 st.set_page_config(page_title="Institutional Equity Terminal", layout="wide", page_icon="💎")
 
@@ -39,67 +38,58 @@ def safe_div(n, d, default=0.0):
     except:
         return default
 
+CUSTOM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
 @st.cache_data(ttl=300)
-def fetch_stock_data(symbol):
+def fetch_stock_data(symbol: str):
+    symbol = symbol.strip().upper()
+    price = None
+    company_name = symbol
+    sector = "General Market"
+    market_cap = 0.0
+    pe_ratio = 0.0
+    roe = 0.0
+    de_ratio = 0.0
+    fcf_yield = 0.0
+    p_score = 0
+
+    # ---------- Tier 1: yfinance ----------
     try:
         ticker = yf.Ticker(symbol)
 
-        # Primary attempt: detailed info
+        # Price (fast_info)
+        try:
+            price = getattr(ticker.fast_info, "last_price", None)
+        except Exception:
+            price = None
+
+        # Fallback history price
+        if not price or pd.isna(price):
+            hist = ticker.history(period="5d")
+            if not hist.empty and "Close" in hist.columns:
+                price = float(hist["Close"].iloc[-1])
+
+        # Fundamental info
         info = ticker.info or {}
-        # Secondary attempt: fast_info (lighter, may have key fields)
-        fast_info = getattr(ticker, "fast_info", {}) or {}
-        # Third attempt: recent price from history
-        hist = ticker.history(period="1d")
-        recent_price = None
-        if not hist.empty:
-            recent_price = hist["Close"].iloc[-1]
-
-        # Helper to pull a value from info → fast_info → default
-        def get_metric(key, alt_key=None, default=None):
-            if key in info and info[key] not in (None, "", {}):
-                return info[key]
-            if alt_key and alt_key in info and info[alt_key] not in (None, "", {}):
-                return info[alt_key]
-            if key in fast_info and fast_info[key] not in (None, "", {}):
-                return fast_info[key]
-            if alt_key and alt_key in fast_info and fast_info[alt_key] not in (None, "", {}):
-                return fast_info[alt_key]
-            return default
-
-        # Essential fundamentals with fallbacks
-        market_cap = get_metric("marketCap", default=0.0)
-        pe_ratio = get_metric("trailingPE", default=0.0)
-        roe_raw = get_metric("returnOnEquity", default=None)
+        company_name = info.get("shortName") or info.get("longName") or symbol
+        sector = info.get("sector", sector)
+        pe_ratio = info.get("trailingPE", 0.0) or 0.0
+        roe_raw = info.get("returnOnEquity", None)
         roe = roe_raw * 100 if isinstance(roe_raw, (int, float)) else 0.0
+        market_cap = info.get("marketCap", ticker.fast_info.market_cap if hasattr(ticker.fast_info, "market_cap") else 0.0) or 0.0
 
-        total_debt = get_metric("totalDebt", default=0.0)
-        total_equity = get_metric("totalStockholderEquity", default=0.0)
-
-        # If balance_sheet provides equity, use it as fallback
-        balance_sheet = ticker.balance_sheet
-        if not total_equity and not balance_sheet.empty and "Stockholders Equity" in balance_sheet.index:
-            total_equity = balance_sheet.loc["Stockholders Equity"].iloc[0]
-
+        total_debt = info.get("totalDebt", 0.0) or 0.0
+        total_equity = info.get("totalStockholderEquity", 0.0) or 0.0
         de_ratio = safe_div(total_debt, total_equity)
 
-        cashflow = ticker.cashflow
-        cfo = 0.0
-        if not cashflow.empty and "Operating Cash Flow" in cashflow.index:
-            cfo = cashflow.loc["Operating Cash Flow"].iloc[0]
-
-        capex = 0.0
-        if not cashflow.empty and "Capital Expenditure" in cashflow.index:
-            capex = abs(cashflow.loc["Capital Expenditure"].iloc[0])
-
-        fcf = cfo - capex
+        cfo = info.get("operatingCashflow", 0.0) or 0.0
+        fcf = info.get("freeCashflow", 0.0) or 0.0
         fcf_yield = safe_div(fcf, market_cap) * 100
 
-        sector = get_metric("sector", default="Industrial")
-        is_fin = "Financial" in sector or "Bank" in sector
-
-        # Piotroski-like score components
-        p_score = 0
-        net_income = get_metric("netIncomeToCommon", default=0)
+        # Simple Piotroski‑like score
+        net_income = info.get("netIncomeToCommon", 0) or 0
         if net_income > 0:
             p_score += 1
         if cfo > 0:
@@ -108,50 +98,64 @@ def fetch_stock_data(symbol):
             p_score += 1
         if roe > 10:
             p_score += 1
-        if de_ratio < 1.0:
+        if de_ratio > 0 and de_ratio < 1.0:
             p_score += 1
         if fcf > 0:
             p_score += 1
+    except Exception:
+        # yfinance completely failed; continue to Tier 2
+        pass
 
-        price = get_metric("currentPrice", "navPrice", default=recent_price or 0.0)
+    # ---------- Tier 2: Direct Yahoo REST ----------
+    if not price or pd.isna(price) or price == 0.0:
+        try:
+            resp = requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+                                headers=CUSTOM_HEADERS, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                meta = data["chart"]["result"][0]["meta"]
+                price = meta.get("regularMarketPrice")
+                company_name = meta.get("shortName", company_name)
+                sector = meta.get("exchangeTimezoneName", sector)
+                market_cap = meta.get("marketCap", market_cap)
+        except Exception:
+            pass
 
-        # Company name fallback chain
-        company_name = info.get("shortName") or info.get("longName") or fast_info.get("shortName") or symbol.upper()
-
-        # Validate that we have at least a price and symbol
-        if price is None or price == 0.0:
-            return None
-
+    # ---------- Return if we have a usable price ----------
+    if price and not pd.isna(price) and price > 0:
         return {
             "Company": company_name,
-            "Symbol": symbol.upper(),
+            "Symbol": symbol,
             "Sector": sector,
-            "Is_Financial": is_fin,
             "Market Cap": market_cap,
             "PE": pe_ratio,
             "ROE %": roe,
             "D/E": de_ratio,
             "FCF Yield %": fcf_yield,
             "Piotroski": p_score,
-            "Price": price,
+            "Price": float(price)
         }
-    except Exception:
-        return None
+    return None
 
 with st.sidebar:
     st.header("🔍 Stock Selector")
-    symbols_input = st.text_input("Enter Tickers (comma separated):", value="AAPL, MSFT, RELIANCE.NS")
+    symbols_input = st.text_input("Enter Tickers (comma separated):", value="AAPL, MSFT, TSLA, RELIANCE.NS")
     complexity = st.radio("Analysis Complexity:", ["🌱 Beginner Investor", "📈 Intermediate Investor", "🏛️ Pro / Institutional Analyst"])
 
 st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
 
 ticker_list = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 results = []
-
+failed = {}
 for sym in ticker_list:
-    data = fetch_stock_data(sym)
-    if data:
-        results.append(data)
+    try:
+        data = fetch_stock_data(sym)
+        if data:
+            results.append(data)
+        else:
+            failed[sym] = "Price not retrieved"
+    except Exception as e:
+        failed[sym] = str(e)
 
 if results:
     df = pd.DataFrame(results)
@@ -161,7 +165,7 @@ if results:
         "🔍 Metric Deep-Dive",
         "🏛️ Bull & Bear Thesis",
         "🛡️ Forensic Risk",
-        "📈 Visuals",
+        "📈 Visuals"
     ])
 
     with tab_matrix:
@@ -172,14 +176,14 @@ if results:
         row = df[df["Symbol"] == selected_sym].iloc[0]
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Live Price", f"${row['Price']:,.2f}")
-        c2.metric("P/E Ratio", f"{row['PE']:.2f}")
-        c3.metric("ROE %", f"{row['ROE %']:.2f}%")
-        c4.metric("D/E Ratio", f"{row['D/E']:.2f}")
+        c2.metric("P/E Ratio", f"{row['PE']:.2f}" if row['PE'] else "N/A")
+        c3.metric("ROE %", f"{row['ROE %']:.2f}%" if row['ROE %'] else "N/A")
+        c4.metric("D/E Ratio", f"{row['D/E']:.2f}" if row['D/E'] else "N/A")
 
     with tab_thesis:
         for _, row in df.iterrows():
             st.subheader(f"{row['Company']} ({row['Symbol']})")
-            if row["Piotroski"] >= 4 and row["ROE %"] > 12:
+            if row["Piotroski"] >= 3 or row["ROE %"] > 12:
                 st.success("Verdict: STRONG BUY / ACCUMULATE")
             else:
                 st.warning("Verdict: HOLD / WATCHLIST")
@@ -187,18 +191,15 @@ if results:
     with tab_risk:
         st.subheader("🛡️ Forensic Risk Summary")
         for _, row in df.iterrows():
-            st.write(f"**{row['Company']}**: Piotroski Score = {row['Piotroski']}/6")
+            st.write(f"**{row['Company']}**: Piotroski Score = {row['Piotroski']}/5")
 
     with tab_visual:
-        fig = px.scatter(
-            df,
-            x="PE",
-            y="ROE %",
-            size="Market Cap",
-            hover_name="Company",
-            title="Valuation vs Return on Equity",
-        )
+        fig = px.scatter(df, x="Price", y="ROE %", size="Market Cap", hover_name="Company",
+                         title="Price vs Return on Equity")
         fig.update_layout(template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
-else:
-    st.error("No valid stock data found. Please verify ticker symbols.")
+
+if failed:
+    with st.expander("🔎 Debug: Failed Tickers & Diagnostics"):
+        for sym, msg in failed.items():
+            st.write(f"**{sym}** – {msg}")

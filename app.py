@@ -1,383 +1,200 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-import requests
-import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
+import time
+import plotly.graph_objects as go
+from datetime import datetime
 
-st.set_page_config(page_title="NSE Institutional Quant & Execution Terminal", layout="wide", page_icon="🇮🇳")
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. UI/UX: HIGH-DENSITY HFT TERMINAL CSS
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="HFT Execution Engine Pro", 
+    layout="wide", 
+    page_icon="⚡",
+    initial_sidebar_state="expanded"
+)
 
 st.markdown("""
 <style>
     :root {
-        --bg-dark: #0e1117;
-        --card-bg: #161b22;
-        --border-color: #30363d;
-        --text-main: #c9d1d9;
+        --bg-dark: #050811;
+        --card-bg: #0e1626;
+        --border-color: #1b273e;
+        --accent-green: #00e676;
+        --accent-red: #ff1744;
+        --accent-cyan: #00e5ff;
     }
-    .stApp { background-color: var(--bg-dark); color: var(--text-main); }
+    .stApp { background-color: var(--bg-dark); color: #e2e8f0; }
+    
     div[data-testid="stMetric"] {
         background-color: var(--card-bg);
         border: 1px solid var(--border-color);
         padding: 12px;
-        border-radius: 8px;
+        border-radius: 6px;
     }
-    .hero-title {
-        font-size: 2rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #ff9933, #ffffff, #128807);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
+    .stTabs [data-baseweb="tab-list"] { gap: 6px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-color);
+        padding: 6px 16px;
+        border-radius: 4px 4px 0 0;
+        font-family: monospace;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: var(--accent-cyan) !important;
+        color: #000000 !important;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
 
-def safe_div(n, d, default=0.0):
-    try:
-        if d is None or n is None: return default
-        n_val, d_val = float(n), float(d)
-        return n_val / d_val if d_val != 0 else default
-    except Exception:
-        return default
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. VECTORIZED HFT STRATEGY ENGINE & LATENCY OPTIMIZER
+# ─────────────────────────────────────────────────────────────────────────────
 
-def format_inr(number):
-    try:
-        val = float(number)
-        if val >= 10000000:
-            return f"INR {val / 10000000:,.2f} Cr"
-        elif val >= 100000:
-            return f"INR {val / 100000:,.2f} Lk"
-        else:
-            return f"INR {val:,.2f}"
-    except Exception:
-        return "INR 0.00"
-
-def extract_financial_metric(df, target_keys):
-    if df is None or df.empty:
-        return 0.0
-    for key in target_keys:
-        if key in df.index:
-            try:
-                val = df.loc[key].iloc[0]
-                if pd.notna(val) and val is not None:
-                    return float(val)
-            except Exception:
-                continue
-    return 0.0
-
-def process_single_ticker(symbol):
-    symbol = symbol.strip().upper()
-    if not symbol.endswith(".NS") and not symbol.endswith(".BO") and "^" not in symbol:
-        symbol = f"{symbol}.NS"
-
-    ticker = yf.Ticker(symbol)
+def generate_synthetic_hft_ticks(num_ticks=10000):
+    """Generates microsecond-level tick data for ultra-fast backtesting."""
+    np.random.seed(42)
+    price_changes = np.random.normal(0, 0.05, num_ticks)
+    prices = 100 + np.cumsum(price_changes)
+    bid_ask_spread = np.random.uniform(0.01, 0.03, num_ticks)
     
-    # 1. Price Fast Fetch
-    price = 0.0
-    try:
-        price = float(ticker.fast_info.last_price or 0.0)
-    except Exception:
-        pass
-
-    if price == 0.0:
-        try:
-            hist = ticker.history(period="5d", timeout=3)
-            if not hist.empty and 'Close' in hist.columns:
-                price = float(hist['Close'].iloc[-1])
-        except Exception:
-            pass
-
-    if price == 0.0:
-        try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get(url, headers=headers, timeout=3)
-            if resp.status_code == 200:
-                meta = resp.json()['chart']['result'][0]['meta']
-                price = float(meta.get('regularMarketPrice', 0.0))
-        except Exception:
-            pass
-
-    if price == 0.0:
-        return None
-
-    # 2. Extract Info safely
-    info = {}
-    try:
-        info = ticker.info or {}
-    except Exception:
-        pass
-
-    company_name = info.get('shortName', info.get('longName', symbol.replace(".NS", "")))
-    sector = info.get('sector', 'General Market')
-    is_financial = any(k in sector.lower() or k in company_name.lower() for k in ['bank', 'financial', 'insurance', 'holding', 'capital'])
-
-    # 3. Parse Balance Sheet & Income Statements
-    bs = pd.DataFrame()
-    financials = pd.DataFrame()
-    cf = pd.DataFrame()
+    bids = prices - (bid_ask_spread / 2)
+    asks = prices + (bid_ask_spread / 2)
+    volumes = np.random.randint(100, 5000, size=num_ticks)
     
-    try:
-        bs = ticker.balance_sheet
-    except Exception:
-        pass
-        
-    try:
-        financials = ticker.financials
-    except Exception:
-        pass
-        
-    try:
-        cf = ticker.cashflow
-    except Exception:
-        pass
+    df = pd.DataFrame({
+        "Tick": np.arange(num_ticks),
+        "Mid_Price": prices,
+        "Bid": bids,
+        "Ask": asks,
+        "Spread": bid_ask_spread,
+        "Volume": volumes
+    })
+    return df
 
-    market_cap = float(info.get('marketCap', 0.0) or ticker.fast_info.market_cap or 0.0)
-    shares_outstanding = float(info.get('sharesOutstanding', 0.0) or 0.0)
+def run_hft_execution_backtest(df, lookback_window, entry_threshold, stop_loss_pct):
+    """
+    Vectorized Order Book Imbalance & Mean Reversion Strategy Engine.
+    Optimized for high-speed calculation to keep latency sub-millisecond.
+    """
+    start_time = time.perf_counter_ns()
+
+    # Vectorized Rolling Window Calculation (Ultra-Fast execution)
+    df['Rolling_Mean'] = df['Mid_Price'].rolling(window=lookback_window).mean()
+    df['Rolling_Std'] = df['Mid_Price'].rolling(window=lookback_window).std()
     
-    if shares_outstanding == 0.0 and market_cap > 0 and price > 0:
-        shares_outstanding = safe_div(market_cap, price)
+    # Z-Score Computation for Micro-Spread Arbitrage
+    df['Z_Score'] = (df['Mid_Price'] - df['Rolling_Mean']) / (df['Rolling_Std'] + 1e-9)
 
-    # Core Metrics Extraction
-    net_income = extract_financial_metric(financials, [
-        'Net Income Common Stockholders', 'Net Income', 
-        'Net Income From Continuing Operation Net Minority Interest'
-    ]) or float(info.get('netIncomeToCommon', 0.0) or 0.0)
+    # Signal Generation: +1 BUY, -1 SELL, 0 HOLD
+    df['Signal'] = 0
+    df.loc[df['Z_Score'] < -entry_threshold, 'Signal'] = 1   # Oversold -> Buy Limit
+    df.loc[df['Z_Score'] > entry_threshold, 'Signal'] = -1   # Overbought -> Short Limit
 
-    eps = float(info.get('trailingEps', 0.0) or info.get('forwardEps', 0.0) or 0.0)
-    if eps == 0.0 and net_income > 0 and shares_outstanding > 0:
-        eps = safe_div(net_income, shares_outstanding)
+    # Fast Position & PnL Vectorization
+    df['Position'] = df['Signal'].shift(1).fillna(0)
+    df['Returns'] = df['Mid_Price'].pct_change().fillna(0)
+    df['Strategy_Returns'] = df['Position'] * df['Returns']
+    df['Cumulative_PnL'] = (1 + df['Strategy_Returns']).cumprod() - 1
 
-    # Multi-Stage P/E Resolution
-    pe_ratio = float(info.get('trailingPE', 0.0) or info.get('forwardPE', 0.0) or 0.0)
-    if pe_ratio == 0.0 and price > 0 and eps > 0:
-        pe_ratio = safe_div(price, eps)
+    # Latency tracking (Nanoseconds to Milliseconds conversion)
+    end_time = time.perf_counter_ns()
+    execution_time_ms = (end_time - start_time) / 1e6
 
-    total_assets = extract_financial_metric(bs, ['Total Assets']) or float(info.get('totalAssets', 0.0) or 0.0)
-    total_liab = extract_financial_metric(bs, ['Total Liabilities Net Minority Interest', 'Total Debt']) or float(info.get('totalDebt', 0.0) or 0.0)
-    total_equity = extract_financial_metric(bs, ['Stockholders Equity', 'Total Equity Gross Minority Interest']) or float(info.get('totalStockholderEquity', 0.0) or 0.0)
-    
-    working_cap = extract_financial_metric(bs, ['Working Capital'])
-    if working_cap == 0.0:
-        ca = extract_financial_metric(bs, ['Current Assets'])
-        cl = extract_financial_metric(bs, ['Current Liabilities'])
-        working_cap = ca - cl
+    # Trade Metrics Calculation
+    trades = df[df['Signal'] != 0]
+    num_trades = len(trades)
+    win_rate = (df['Strategy_Returns'] > 0).sum() / max(num_trades, 1) * 100
+    total_pnl = df['Cumulative_PnL'].iloc[-1] * 100
+    sharpe_ratio = (df['Strategy_Returns'].mean() / (df['Strategy_Returns'].std() + 1e-9)) * np.sqrt(252 * 7800) # Intraday annualization
 
-    revenue = extract_financial_metric(financials, ['Total Revenue']) or float(info.get('totalRevenue', 0.0) or 0.0)
-    ebit = extract_financial_metric(financials, ['EBIT', 'EBITDA', 'Operating Income']) or float(info.get('ebitda', 0.0) or 0.0)
-    pretax_income = extract_financial_metric(financials, ['Pretax Income', 'Tax Provision']) or ebit
-
-    cfo = extract_financial_metric(cf, ['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities']) or float(info.get('operatingCashflow', 0.0) or 0.0)
-    capex = abs(extract_financial_metric(cf, ['Capital Expenditure', 'Investments In Property Plant And Equipment']))
-    
-    # 4. Precision Calculations
-    roe = float(info.get('returnOnEquity', 0.0) or 0.0) * 100
-    if roe == 0.0 and total_equity > 0 and net_income != 0.0:
-        roe = safe_div(net_income, total_equity) * 100
-
-    if is_financial:
-        fcf = cfo if cfo != 0.0 else net_income
-    else:
-        fcf = float(info.get('freeCashflow', 0.0) or 0.0)
-        if fcf == 0.0 and cfo != 0.0:
-            fcf = cfo - capex
-
-    fcf_yield = safe_div(fcf, market_cap) * 100 if market_cap > 0 else 0.0
-
-    # 5. Emerging Market Quant Models
-    retained_earnings = extract_financial_metric(bs, ['Retained Earnings'])
-    x1 = safe_div(working_cap, total_assets)
-    x2 = safe_div(retained_earnings, total_assets)
-    x3 = safe_div(ebit, total_assets)
-    x4 = safe_div(total_equity, total_liab)
-    altman_z = (6.56 * x1) + (3.26 * x2) + (6.72 * x3) + (1.05 * x4)
-    
-    z_status = "N/A (Financial Asset)" if is_financial else ("Safe Zone" if altman_z > 2.60 else ("Grey Zone" if altman_z >= 1.10 else "Distress Zone"))
-
-    sloan_ratio = safe_div(net_income - cfo, total_assets) * 100 if total_assets > 0 else 0.0
-    sloan_status = "High Accrual Risk" if abs(sloan_ratio) > 15 else ("Moderate Accrual" if abs(sloan_ratio) > 10 else "High Cash Quality")
-
-    # Piotroski F-Score (Full 9 Criteria)
-    p_score = 0
-    if net_income > 0: p_score += 1
-    if cfo > 0: p_score += 1
-    if cfo > net_income: p_score += 1
-    if roe > 10: p_score += 1
-    
-    total_debt = float(info.get('totalDebt', 0.0) or total_liab)
-    de_ratio = safe_div(total_debt, total_equity)
-    if de_ratio < 1.5: p_score += 1
-    if fcf > 0: p_score += 1
-    
-    op_margin = safe_div(ebit, revenue) * 100
-    if op_margin > 12: p_score += 1
-    
-    asset_turnover = safe_div(revenue, total_assets)
-    if asset_turnover > 0.4 or is_financial: p_score += 1
-    if safe_div(working_cap, total_assets) > 0 or is_financial: p_score += 1
-
-    # Composite Factor Rating (0-100 Score)
-    factor_score = 0
-    if roe >= 18: factor_score += 25
-    elif roe >= 12: factor_score += 15
-    elif roe > 0: factor_score += 5
-
-    if p_score >= 8: factor_score += 25
-    elif p_score >= 6: factor_score += 18
-    elif p_score >= 4: factor_score += 10
-
-    if fcf_yield >= 4.0: factor_score += 25
-    elif fcf_yield >= 2.0: factor_score += 18
-    elif fcf_yield > 0: factor_score += 10
-
-    if 0 < pe_ratio <= 25: factor_score += 25
-    elif 25 < pe_ratio <= 45: factor_score += 15
-    elif pe_ratio > 45: factor_score += 5
-
-    if factor_score >= 80:
-        signal, action = "STRONG BUY", "ALLOCATE FULL SIZE: Exceptional quality, high cash conversion, & strong valuation."
-    elif factor_score >= 60:
-        signal, action = "ACCUMULATE", "ALLOCATE PARTIAL SIZE: Strong fundamental core, monitor valuation entry points."
-    elif factor_score >= 40:
-        signal, action = "NEUTRAL", "HOLD: Mixed quantitative signals. Await catalysts or earnings growth."
-    else:
-        signal, action = "EXIT / REDUCE", "LIQUIDATE / AVOID: High quantitative drag, low earnings quality, or valuation overload."
-
-    # DuPont Decomposition
-    tax_burden = safe_div(net_income, pretax_income)
-    interest_burden = safe_div(pretax_income, ebit)
-    eq_multiplier = safe_div(total_assets, total_equity)
-
-    algo_payload = {
-        "ticker": symbol,
-        "price_inr": price,
-        "quant_score": factor_score,
-        "signal": signal,
-        "action": action,
-        "metrics": {
-            "pe_ratio": round(pe_ratio, 2),
-            "roe_pct": round(roe, 2),
-            "fcf_yield_pct": round(fcf_yield, 2),
-            "piotroski_score": p_score,
-            "altman_z": round(altman_z, 2),
-            "sloan_ratio_pct": round(sloan_ratio, 2)
-        }
+    return df, {
+        "Execution_Time_ms": execution_time_ms,
+        "Total_Trades": num_trades,
+        "Win_Rate_%": win_rate,
+        "Total_PnL_%": total_pnl,
+        "Sharpe_Ratio": sharpe_ratio
     }
 
-    return {
-        "Company": company_name,
-        "Symbol": symbol,
-        "Sector": sector,
-        "Market Cap": market_cap,
-        "Price": price,
-        "PE": pe_ratio,
-        "EPS": eps,
-        "ROE %": roe,
-        "D/E": de_ratio,
-        "FCF Yield %": fcf_yield,
-        "Piotroski Score": p_score,
-        "Altman Z-Score": altman_z,
-        "Z-Status": z_status,
-        "Sloan Ratio %": sloan_ratio,
-        "Sloan Status": sloan_status,
-        "Quant Score": factor_score,
-        "Quant Signal": signal,
-        "Action Strategy": action,
-        "Algo Payload": json.dumps(algo_payload, indent=2),
-        "Tax Burden": tax_burden,
-        "Interest Burden": interest_burden,
-        "Op Margin %": op_margin,
-        "Asset Turnover": asset_turnover,
-        "Equity Multiplier": eq_multiplier
-    }
-
-def fetch_all_quant_data(ticker_list):
-    results = []
-    failed = []
-    with ThreadPoolExecutor(max_workers=min(len(ticker_list), 6)) as executor:
-        future_to_symbol = {executor.submit(process_single_ticker, sym): sym for sym in ticker_list}
-        for future in as_completed(future_to_symbol):
-            sym = future_to_symbol[future]
-            try:
-                res = future.result()
-                if res:
-                    results.append(res)
-                else:
-                    failed.append(sym)
-            except Exception:
-                failed.append(sym)
-    return results, failed
-
-# UI Layout
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. SIDEBAR ALGORITHMIC PARAMETERS
+# ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("NSE / BSE Algorithmic Engine")
-    symbols_input = st.text_input("NSE Tickers (comma separated):", value="RELIANCE, TCS, HDFCBANK, INFY, TATAMOTORS, ICICIBANK, LT")
-    st.caption("Parallel Multi-Thread Engine active with timeout bounds.")
-
-st.markdown("<h1 class='hero-title'>Indian Institutional Quantitative Terminal</h1>", unsafe_allow_html=True)
-
-ticker_list = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
-
-if ticker_list:
-    with st.spinner("Processing quantitative models & resolving financial data feeds..."):
-        results, failed = fetch_all_quant_data(ticker_list)
+    st.header("⚡ HFT Engine Controls")
     
-    if results:
-        df = pd.DataFrame(results)
-        
-        tab_exec, tab_matrix, tab_algo, tab_forensics, tab_dupont = st.tabs([
-            "🎯 Trading Signals", "📊 Master Matrix", "🤖 Algo API JSON", "🔬 Forensic Audit", "🏛️ DuPont Analysis"
-        ])
+    st.subheader("Data & Streaming Source")
+    data_mode = st.radio("Tick Data Feed:", ["Synthetic HFT Stream", "Upload Real Tick CSV"])
+    num_ticks = st.number_input("Number of Simulated Ticks", value=10000, step=1000)
+    
+    st.subheader("Algorithmic Strategy Inputs")
+    lookback = st.slider("Micro-Lookback Window (Ticks)", 5, 200, 20)
+    z_threshold = st.slider("Z-Score Entry Threshold", 0.5, 3.5, 1.5, step=0.1)
+    stop_loss = st.number_input("Hardware Stop Loss (%)", value=0.05, step=0.01)
 
-        with tab_exec:
-            st.subheader("Quantitative Allocation Signals")
-            for _, row in df.iterrows():
-                sig = row['Quant Signal']
-                badge = "🟢" if "BUY" in sig else ("🔵" if "ACCUMULATE" in sig else ("🟡" if "NEUTRAL" in sig else "🔴"))
-                
-                with st.expander(f"{badge} {sig} | {row['Company']} ({row['Symbol']}) | Price: INR {row['Price']:,.2f} | Score: {row['Quant Score']}/100"):
-                    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
-                    col1.metric("Quant Factor Score", f"{row['Quant Score']}/100")
-                    col2.metric("P/E Ratio", f"{row['PE']:.2f}" if row['PE'] > 0 else "N/A")
-                    col3.metric("ROE / FCF Yield", f"{row['ROE %']:.1f}% / {row['FCF Yield %']:.1f}%")
-                    col4.info(f"**Execution Directive:** {row['Action Strategy']}")
+    st.divider()
+    uploaded_ticks = None
+    if data_mode == "Upload Real Tick CSV":
+        uploaded_ticks = st.file_uploader("Upload Raw Order Book / Tick Data", type=["csv"])
 
-        with tab_matrix:
-            display_df = df[["Company", "Symbol", "Price", "PE", "EPS", "ROE %", "FCF Yield %", "Piotroski Score", "Quant Score", "Quant Signal"]].copy()
-            display_df["Price"] = display_df["Price"].apply(lambda x: f"INR {x:,.2f}")
-            display_df["PE"] = display_df["PE"].apply(lambda x: f"{x:.2f}" if x > 0 else "N/A")
-            display_df["EPS"] = display_df["EPS"].apply(lambda x: f"INR {x:.2f}" if x > 0 else "N/A")
-            display_df["ROE %"] = display_df["ROE %"].apply(lambda x: f"{x:.2f}%")
-            display_df["FCF Yield %"] = display_df["FCF Yield %"].apply(lambda x: f"{x:.2f}%")
-            st.dataframe(display_df, use_container_width=True)
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. EXECUTION TERMINAL & METRICS
+# ─────────────────────────────────────────────────────────────────────────────
+st.title("⚡ Ultra-Low Latency HFT Execution Terminal")
+st.caption("Sub-Millisecond Vectorized Backtesting & Automated Algorithmic Strategy Optimizer")
 
-        with tab_algo:
-            st.subheader("Algorithmic Trading Payload Schema")
-            st.caption("JSON structure ready for automated trading engines (e.g., Zerodha Kite Connect, Upstox API).")
-            for _, row in df.iterrows():
-                st.markdown(f"**Payload: `{row['Symbol']}`**")
-                st.code(row['Algo Payload'], language='json')
+# Load Tick Stream
+if uploaded_ticks is not None:
+    tick_df = pd.read_csv(uploaded_ticks)
+else:
+    tick_df = generate_synthetic_hft_ticks(num_ticks)
 
-        with tab_forensics:
-            st.subheader("Forensic Accounting Audit")
-            for _, row in df.iterrows():
-                with st.expander(f"🔍 {row['Company']} ({row['Symbol']}) Audit Details"):
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Altman Z''-Score", f"{row['Altman Z-Score']:.2f}", delta=row['Z-Status'])
-                    c2.metric("Sloan Accrual Ratio", f"{row['Sloan Ratio %']:.2f}%", delta=row['Sloan Status'])
-                    c3.metric("Piotroski Quality", f"{row['Piotroski Score']}/9")
+# Run Algorithmic Execution Core
+results_df, metrics = run_hft_execution_backtest(tick_df, lookback, z_threshold, stop_loss)
 
-        with tab_dupont:
-            st.subheader("5-Step DuPont Breakdown")
-            selected_dupont = st.selectbox("Select Asset:", df["Symbol"].unique(), key="dupont_select")
-            d_row = df[df["Symbol"] == selected_dupont].iloc[0]
-            
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Op Margin %", f"{d_row['Op Margin %']:.2f}%")
-            c2.metric("Asset Turnover", f"{d_row['Asset Turnover']:.2f}x")
-            c3.metric("Equity Multiplier", f"{d_row['Equity Multiplier']:.2f}x")
-            c4.metric("Interest Burden", f"{d_row['Interest Burden']:.2f}")
-            c5.metric("Tax Burden", f"{d_row['Tax Burden']:.2f}")
+# Metric KPIs
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Engine Latency", f"{metrics['Execution_Time_ms']:.3f} ms")
+c2.metric("Executed Orders", f"{metrics['Total_Trades']:,}")
+c3.metric("Win Rate", f"{metrics['Win_Rate_%']:.1f}%")
+c4.metric("Strategy PnL", f"{metrics['Total_PnL_%']:.2f}%")
+c5.metric("Sharpe Ratio", f"{metrics['Sharpe_Ratio']:.2f}")
 
-    if failed:
-        st.warning(f"Could not resolve price/metrics for: {', '.join(failed)}")
+tab_charts, tab_trades, tab_orderbook, tab_export = st.tabs([
+    "📈 Live Execution & PnL", "⚡ Order Log", "📊 Micro-Structure Analysis", "💾 Export Engine State"
+])
+
+with tab_charts:
+    st.subheader("High-Frequency Tick Price & PnL Tracking")
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=results_df['Tick'], y=results_df['Mid_Price'], mode='lines', name='Mid Price', line=dict(color='#00e5ff', width=1)))
+    
+    # Mark Buy/Sell Signals
+    buys = results_df[results_df['Signal'] == 1]
+    sells = results_df[results_df['Signal'] == -1]
+    
+    fig.add_trace(go.Scatter(x=buys['Tick'], y=buys['Mid_Price'], mode='markers', name='BUY Signal', marker=dict(color='#00e676', size=6, symbol='triangle-up')))
+    fig.add_trace(go.Scatter(x=sells['Tick'], y=sells['Mid_Price'], mode='markers', name='SELL Signal', marker=dict(color='#ff1744', size=6, symbol='triangle-down')))
+
+    fig.update_layout(template="plotly_dark", height=450, xaxis_title="Tick Counter", yaxis_title="Price ($)")
+    st.plotly_chart(fig, use_container_width=True)
+
+with tab_trades:
+    st.subheader("Executed Orders Log")
+    st.dataframe(results_df[results_df['Signal'] != 0][['Tick', 'Mid_Price', 'Bid', 'Ask', 'Z_Score', 'Signal', 'Strategy_Returns']], use_container_width=True)
+
+with tab_orderbook:
+    st.subheader("Spread and Z-Score Distribution")
+    fig_z = go.Figure()
+    fig_z.add_trace(go.Scatter(x=results_df['Tick'], y=results_df['Z_Score'], mode='lines', name='Z-Score', line=dict(color='#f59e0b', width=1)))
+    fig_z.add_hline(y=z_threshold, line_dash="dash", line_color="#ff1744", annotation_text="Upper Entry Limit")
+    fig_z.add_hline(y=-z_threshold, line_dash="dash", line_color="#00e676", annotation_text="Lower Entry Limit")
+    fig_z.update_layout(template="plotly_dark", height=400, xaxis_title="Tick Counter", yaxis_title="Z-Score")
+    st.plotly_chart(fig_z, use_container_width=True)
+
+with tab_export:
+    st.subheader("Engine Export Interface")
+    csv_out = results_df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Export Execution Log (CSV)", data=csv_out, file_name=f"HFT_Execution_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")

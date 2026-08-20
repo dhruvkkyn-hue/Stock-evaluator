@@ -1,27 +1,3 @@
-Transform `app.py` into a fully Indianized Institutional Quant & Forensic Terminal for NSE/BSE stocks. Update `fetch_stock_data()` and the Streamlit UI to handle Indian Rupee (₹) formatting, Indian Crore/Lakh financial conventions, and ultra-rigorous quantitative models:
-
-1. INDIANIZATION & CURRENCY:
-   - Currency Symbol: Display all prices, market caps, and financial figures in Indian Rupees (₹).
-   - Market Cap Formatting: Automatically format large figures in ₹ Crores (₹ Cr) or ₹ Lakhs (₹ Lk) instead of millions/billions.
-   - Default Tickers: Pre-populate inputs with prominent NSE tickers (`RELIANCE.NS`, `TCS.NS`, `HDFCBANK.NS`, `INFY.NS`, `TATAMOTORS.NS`). Append `.NS` automatically if no suffix is entered by the user.
-
-2. QUANT & FORENSIC MODELS:
-   - Emerging Market Altman Z''-Score: Z'' = 6.56(X1) + 3.26(X2) + 6.72(X3) + 1.05(X4), tailored for emerging markets. Safe (Z > 2.6), Grey (1.1 to 2.6), Distress (Z < 1.1).
-   - Beneish M-Score (Full Proxy): Evaluates Days Sales in Receivables, Asset Quality, Gross Margin, and Accruals. High Risk if M > -1.78.
-   - Full 9-Point Piotroski F-Score: Evaluates Profitability, Leverage/Liquidity, and Operating Efficiency.
-   - Sloan Accrual Ratio: Accruals / Total Assets. Quality (< 10%), High Risk (> 15%).
-   - 5-Step DuPont Breakdown: ROE = Operating Margin × Asset Turnover × Interest Burden × Tax Burden × Equity Multiplier.
-
-3. STREAMLIT UI:
-   - Dark-mode institutional terminal with tabs: 📊 Master Matrix, 🔬 Quant & Forensics, 🏛️ DuPont Analysis, 🔍 Deep-Dive Metrics, 📈 Visual Analytics.
-   - Ensure the multi-tier fetch pipeline (yfinance -> Yahoo REST API fallback) prevents crashes and empty screens.
-
-OUTPUT FORMATTING MANDATE:
-- Return ONLY valid, complete, runnable Python code for the entire app.
-- DO NOT include introductory sentences, greetings, markdown text outside the code block, explanations, or closing remarks.
-- Output strictly a single executable ```python code block containing the FULL file.
-
-```python
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -66,13 +42,13 @@ def format_inr(number):
     try:
         val = float(number)
         if val >= 10000000:  # 1 Crore = 10,000,000
-            return f"₹{val / 10000000:,.2f} Cr"
+            return f"INR {val / 10000000:,.2f} Cr"
         elif val >= 100000:   # 1 Lakh = 100,000
-            return f"₹{val / 100000:,.2f} Lk"
+            return f"INR {val / 100000:,.2f} Lk"
         else:
-            return f"₹{val:,.2f}"
+            return f"INR {val:,.2f}"
     except:
-        return "₹0.00"
+        return "INR 0.00"
 
 @st.cache_data(ttl=300)
 def fetch_stock_data(symbol):
@@ -157,25 +133,25 @@ def fetch_stock_data(symbol):
                 altman_z = (6.56 * x1) + (3.26 * x2) + (6.72 * x3) + (1.05 * x4)
                 
                 if altman_z > 2.60:
-                    z_status = "✅ Safe Zone"
+                    z_status = "Safe Zone"
                 elif altman_z >= 1.10:
-                    z_status = "⚡ Grey Zone"
+                    z_status = "Grey Zone"
                 else:
-                    z_status = "🚨 Distress Zone"
+                    z_status = "Distress Zone"
 
             # 2. Sloan Ratio (Accrual Anomaly)
             if total_assets and total_assets > 0:
                 sloan_ratio = safe_div(net_income - cfo, total_assets) * 100
                 if abs(sloan_ratio) > 15:
-                    sloan_status = "⚠️ High Accrual Risk"
+                    sloan_status = "High Accrual Risk"
                 elif abs(sloan_ratio) > 10:
-                    sloan_status = "⚡ Moderate Accrual"
+                    sloan_status = "Moderate Accrual"
                 else:
-                    sloan_status = "✅ High Cash Quality"
+                    sloan_status = "High Cash Quality"
 
             # 3. Beneish M-Score Proxy Check
             if cfo < net_income and sloan_ratio > 12:
-                beneish_status = "⚠️ Profit Manipulation Risk"
+                beneish_status = "Profit Manipulation Risk"
 
             # 4. 5-Step DuPont Deconstruction
             tax_burden = safe_div(net_income, pretax_income)
@@ -247,11 +223,11 @@ def fetch_stock_data(symbol):
     return None
 
 with st.sidebar:
-    st.header("🇮🇳 NSE / BSE Quant Terminal")
+    st.header("NSE / BSE Quant Terminal")
     symbols_input = st.text_input("NSE Tickers (comma separated):", value="RELIANCE, TCS, HDFCBANK, INFY, TATAMOTORS")
     st.caption("Note: Enter ticker symbols like RELIANCE, TCS, or INFY. .NS is added automatically.")
 
-st.markdown("<h1 class='hero-title'>🏛️ Indian Institutional Quantitative Terminal</h1>", unsafe_allow_html=True)
+st.markdown("<h1 class='hero-title'>Indian Institutional Quantitative Terminal</h1>", unsafe_allow_html=True)
 
 ticker_list = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 results = []
@@ -268,25 +244,25 @@ if results:
     df = pd.DataFrame(results)
     
     tab_matrix, tab_forensics, tab_dupont, tab_deep, tab_visual = st.tabs([
-        "📊 Master Matrix", "🔬 Quant & Forensics", "🏛️ DuPont Analysis", "🔍 Metric Deep-Dive", "📈 Visual Analytics"
+        "Master Matrix", "Quant & Forensics", "DuPont Analysis", "Metric Deep-Dive", "Visual Analytics"
     ])
 
     with tab_matrix:
         display_df = df[["Company", "Symbol", "Price", "PE", "ROE %", "D/E", "FCF Yield %", "Piotroski Score", "Z-Status"]].copy()
-        display_df["Price"] = display_df["Price"].apply(lambda x: f"₹{x:,.2f}")
+        display_df["Price"] = display_df["Price"].apply(lambda x: f"INR {x:,.2f}")
         st.dataframe(display_df, use_container_width=True)
 
     with tab_forensics:
-        st.subheader("🔬 Forensic Accounting & Insolvency Risk")
+        st.subheader("Forensic Accounting & Insolvency Risk")
         for _, row in df.iterrows():
-            with st.expander(f"📌 {row['Company']} ({row['Symbol']}) Forensic Audit"):
+            with st.expander(f"{row['Company']} ({row['Symbol']}) Forensic Audit"):
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Altman Z''-Score (Emerging)", f"{row['Altman Z-Score']:.2f}", delta=row['Z-Status'])
                 c2.metric("Sloan Ratio", f"{row['Sloan Ratio %']:.2f}%", delta=row['Sloan Status'])
                 c3.metric("Earnings Quality", row['Beneish Risk'])
 
     with tab_dupont:
-        st.subheader("🏛️ 5-Step DuPont Deconstruction")
+        st.subheader("5-Step DuPont Deconstruction")
         selected_dupont = st.selectbox("Select Company for DuPont Analysis:", df["Symbol"].unique(), key="dupont_select")
         d_row = df[df["Symbol"] == selected_dupont].iloc[0]
         
@@ -301,7 +277,7 @@ if results:
         selected_sym = st.selectbox("Select Ticker:", df["Symbol"].unique(), key="deep_select")
         row = df[df["Symbol"] == selected_sym].iloc[0]
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Live Price", f"₹{row['Price']:,.2f}")
+        c1.metric("Live Price", f"INR {row['Price']:,.2f}")
         c2.metric("Market Cap", format_inr(row['Market Cap']))
         c3.metric("P/E Ratio", f"{row['PE']:.2f}" if row['PE'] else "N/A")
         c4.metric("ROE %", f"{row['ROE %']:.2f}%" if row['ROE %'] else "N/A")

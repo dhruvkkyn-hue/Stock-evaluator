@@ -5,381 +5,336 @@ import io
 import zipfile
 import plotly.express as px
 import plotly.graph_objects as go
-import traceback
+from scipy.signal import find_peaks, savgol_filter
 from datetime import datetime
-from scipy.signal import find_peaks
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. UI/UX: INSTITUTIONAL ECHEM CSS INJECTION
+# 1. UI/UX: HIGH-DENSITY LABORATORY TERMINAL CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Electrochemical Quality Terminal", 
+    page_title="EChem Quality Terminal Pro", 
     layout="wide", 
-    page_icon="⚡"
+    page_icon="⚡",
+    initial_sidebar_state="expanded"
 )
 
-def inject_custom_css():
-    st.markdown("""
-    <style>
-        :root {
-            --bg-dark: #0e1117;
-            --card-bg: #161b22;
-            --border-color: #30363d;
-            --text-main: #c9d1d9;
-            --text-heading: #ffffff;
-            --accent-emerald: #10b981;
-            --accent-blue: #3b82f6;
-            --accent-amber: #f59e0b;
-            --accent-red: #ef4444;
-        }
-        .stApp { background-color: var(--bg-dark); color: var(--text-main); }
-        
-        div[data-testid="stMetric"] {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            padding: 18px;
-            border-radius: 10px;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-        }
-        
-        h1, h2, h3, h4 { 
-            color: var(--text-heading) !important; 
-            font-family: 'Inter', system-ui, -apple-system, sans-serif;
-            font-weight: 700;
-        }
-        .hero-title {
-            font-size: 2.2rem;
-            font-weight: 800;
-            background: linear-gradient(90deg, #ffffff, #94a3b8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0.2rem;
-        }
-        .hero-subtitle { 
-            color: #8b949e; 
-            font-size: 1.05rem; 
-            margin-bottom: 1.8rem; 
-        }
-        
-        .stTabs [data-baseweb="tab-list"] { 
-            gap: 10px; 
-            border-bottom: 1px solid var(--border-color);
-        }
-        .stTabs [data-baseweb="tab"] {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 6px 6px 0px 0px;
-            padding: 10px 24px;
-            color: var(--text-main);
-            font-weight: 600;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: var(--accent-emerald) !important;
-            color: #ffffff !important;
-            border-color: var(--accent-emerald) !important;
-        }
-        
-        .status-pass {
-            background-color: rgba(16, 185, 129, 0.2);
-            color: #10b981;
-            padding: 4px 12px;
-            border-radius: 6px;
-            font-weight: 800;
-            border: 1px solid #10b981;
-            display: inline-block;
-        }
-        .status-fail {
-            background-color: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-            padding: 4px 12px;
-            border-radius: 6px;
-            font-weight: 800;
-            border: 1px solid #ef4444;
-            display: inline-block;
-        }
-    </style>
-    """, unsafe_allow_html=True)
-
-inject_custom_css()
+st.markdown("""
+<style>
+    :root {
+        --bg-dark: #090d16;
+        --card-bg: #111726;
+        --border-color: #1f293d;
+        --accent-emerald: #10b981;
+        --accent-blue: #3b82f6;
+        --accent-red: #ef4444;
+        --accent-amber: #f59e0b;
+    }
+    .stApp { background-color: var(--bg-dark); color: #cbd5e1; }
+    
+    div[data-testid="stMetric"] {
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-color);
+        padding: 14px;
+        border-radius: 8px;
+    }
+    .status-pass {
+        background-color: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-weight: 700;
+        border: 1px solid #10b981;
+    }
+    .status-fail {
+        background-color: rgba(239, 68, 68, 0.15);
+        color: #ef4444;
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-weight: 700;
+        border: 1px solid #ef4444;
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] {
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-color);
+        padding: 8px 18px;
+        border-radius: 6px 6px 0 0;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: var(--accent-emerald) !important;
+        color: #ffffff !important;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. ECHEM QUANT ENGINE: PARSING & SIGNAL ANALYTICS
+# 2. HARDWARE-AWARE FILE PARSER & SIGNAL CLEANER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def detect_column(df, candidates):
-    """Fuzzy column matcher for Potentiostat exports (Gamry, BioLogic, Autolab, etc.)."""
+def strip_potentiostat_headers(file_bytes, filename):
+    """Detects and strips equipment metadata lines (BioLogic, Gamry, CHI, Autolab)."""
+    text = file_bytes.decode('utf-8', errors='ignore')
+    lines = text.splitlines()
+    
+    start_line = 0
+    for idx, line in enumerate(lines[:100]): # Scan first 100 lines for header end
+        line_l = line.lower()
+        if any(key in line_l for key in ['potential', 'ewe', 'voltage', 'zreal', 'z\'', 'current']):
+            if not line_l.startswith('#') and not line_l.startswith(';') and not line_l.startswith('biologic'):
+                start_line = idx
+                break
+
+    clean_csv_str = "\n".join(lines[start_line:])
+    return pd.read_csv(io.StringIO(clean_csv_str))
+
+def find_col(df, options):
+    """Fuzzy column matcher."""
     for col in df.columns:
-        clean = str(col).lower().replace("_", " ").replace("-", " ").strip()
-        if any(c in clean for c in candidates):
+        c_clean = str(col).lower().replace("_", " ").replace("-", " ").strip()
+        if any(o in c_clean for o in options):
             return col
     return None
 
 @st.cache_data(show_spinner=False)
-def parse_and_analyze_echem(file_bytes, filename, tolerance_settings):
-    """
-    Parses CV / EIS / LSV datasets, detects redox peaks, calculates 
-    $\Delta E_p$, signal noise, and returns QC pass/fail status.
-    """
+def process_echem_file(file_bytes, filename, settings):
+    """Core electrochemistry engine: Peak finding, smoothing, Randles & noise analysis."""
     try:
-        if filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(file_bytes))
+        if filename.endswith('.csv') or filename.endswith('.txt') or filename.endswith('.mpt'):
+            df = strip_potentiostat_headers(file_bytes, filename)
         else:
             df = pd.read_excel(io.BytesIO(file_bytes))
 
-        v_col = detect_column(df, ["potential", "voltage", "ewe", "v"])
-        i_col = detect_column(df, ["current", "i", "amp", "ma", "ua"])
-        z_real_col = detect_column(df, ["zreal", "z'"])
-        z_imag_col = detect_column(df, ["zimag", "-z''", "z''"])
+        # Column identification
+        v_col = find_col(df, ['potential', 'ewe', 'voltage', 'v'])
+        i_col = find_col(df, ['current', 'i', 'amp', 'ma', 'ua', 'a'])
+        zr_col = find_col(df, ['zreal', "z'", 'z_real', 'real'])
+        zi_col = find_col(df, ['zimag', "z''", '-z\'\'', 'z_imag', 'imag'])
 
-        res = {
+        out = {
             "Filename": filename,
-            "Type": "CV/Voltammetry" if (v_col and i_col) else ("EIS" if (z_real_col and z_imag_col) else "Unknown"),
+            "Type": "Unknown",
             "Status": "PASS",
             "Flags": [],
-            "Peak_Anodic_I": 0.0,
-            "Peak_Cathodic_I": 0.0,
-            "E_pa": 0.0,
-            "E_pc": 0.0,
-            "Delta_Ep": 0.0,
-            "SNR": 0.0,
-            "R_ct_Approx": 0.0
+            "I_pa": 0.0, "I_pc": 0.0, "E_pa": 0.0, "E_pc": 0.0,
+            "Delta_Ep": 0.0, "SNR": 0.0, "Rs": 0.0, "Rct": 0.0,
+            "df": df
         }
 
+        # Voltammetry Path (CV/LSV)
         if v_col and i_col:
+            out["Type"] = "Voltammetry (CV/LSV)"
+            out["v_col"] = v_col
+            out["i_col"] = i_col
+
             df[v_col] = pd.to_numeric(df[v_col], errors='coerce')
             df[i_col] = pd.to_numeric(df[i_col], errors='coerce')
             df.dropna(subset=[v_col, i_col], inplace=True)
 
-            i_vals = df[i_col].values
+            raw_i = df[i_col].values
             v_vals = df[v_col].values
 
-            # Anodic & Cathodic Peak Search
-            pos_peaks, _ = find_peaks(i_vals, prominence=tolerance_settings["prominence"])
-            neg_peaks, _ = find_peaks(-i_vals, prominence=tolerance_settings["prominence"])
+            # Signal Smoothing (Savitzky-Golay)
+            if len(raw_i) > 15 and settings["smooth"]:
+                win = min(15, len(raw_i) - (1 - len(raw_i) % 2))
+                proc_i = savgol_filter(raw_i, window_length=max(5, win), polyorder=2)
+            else:
+                proc_i = raw_i
 
-            ipa = i_vals[pos_peaks].max() if len(pos_peaks) > 0 else i_vals.max()
-            ipc = i_vals[neg_peaks].min() if len(neg_peaks) > 0 else i_vals.min()
+            df["I_Filtered"] = proc_i
 
-            epa = v_vals[np.where(i_vals == ipa)[0][0]] if len(v_vals) > 0 else 0.0
-            epc = v_vals[np.where(i_vals == ipc)[0][0]] if len(v_vals) > 0 else 0.0
+            # Peak identification
+            pos_p, _ = find_peaks(proc_i, prominence=settings["prominence"])
+            neg_p, _ = find_peaks(-proc_i, prominence=settings["prominence"])
+
+            ipa = proc_i[pos_p].max() if len(pos_p) > 0 else proc_i.max()
+            ipc = proc_i[neg_p].min() if len(neg_p) > 0 else proc_i.min()
+
+            epa = v_vals[np.where(proc_i == ipa)[0][0]] if len(v_vals) > 0 else 0.0
+            epc = v_vals[np.where(proc_i == ipc)[0][0]] if len(v_vals) > 0 else 0.0
 
             delta_ep = abs(epa - epc)
-            peak_diff = ipa - ipc
-            
-            # Noise estimation via signal variance
-            signal_mean = np.mean(np.abs(i_vals))
-            noise = np.std(np.diff(i_vals))
-            snr = safe_div(signal_mean, noise)
+            span_i = ipa - ipc
 
-            res.update({
-                "Peak_Anodic_I": ipa,
-                "Peak_Cathodic_I": ipc,
-                "Peak_to_Peak_I": peak_diff,
-                "E_pa": epa,
-                "E_pc": epc,
-                "Delta_Ep": delta_ep,
-                "SNR": snr,
-                "V_col": v_col,
-                "I_col": i_col
+            # Noise / Signal Integrity
+            residual = raw_i - proc_i
+            noise = np.std(residual) if np.std(residual) > 0 else 1e-12
+            snr = np.mean(np.abs(proc_i)) / noise
+
+            out.update({
+                "I_pa": ipa, "I_pc": ipc, "E_pa": epa, "E_pc": epc,
+                "Delta_Ep": delta_ep, "Peak_Span": span_i, "SNR": snr
             })
 
-            # Automated Quality Gates
-            if peak_diff < tolerance_settings["min_peak_diff"]:
-                res["Status"] = "FAIL"
-                res["Flags"].append("Low Response Threshold")
-            if delta_ep > tolerance_settings["max_delta_ep"]:
-                res["Status"] = "FAIL"
-                res["Flags"].append("Excessive Peak Splitting (Reversibility Drop)")
-            if snr < tolerance_settings["min_snr"]:
-                res["Status"] = "FAIL"
-                res["Flags"].append("Low SNR / Signal Noise")
+            # Pass/Fail Verification Logic
+            if span_i < settings["min_span"]:
+                out["Status"] = "FAIL"
+                out["Flags"].append("Low Faradaic Current Response")
+            if delta_ep > settings["max_dep"]:
+                out["Status"] = "FAIL"
+                out["Flags"].append("Sluggish Kinetics (High ΔEp)")
+            if snr < settings["min_snr"]:
+                out["Status"] = "FAIL"
+                out["Flags"].append("Excessive Instrumentation Noise")
 
-        elif z_real_col and z_imag_col:
-            df[z_real_col] = pd.to_numeric(df[z_real_col], errors='coerce')
-            df[z_imag_col] = pd.to_numeric(df[z_imag_col], errors='coerce')
-            df.dropna(subset=[z_real_col, z_imag_col], inplace=True)
-            
-            r_ct = df[z_real_col].max() - df[z_real_col].min()
-            res.update({
-                "R_ct_Approx": r_ct,
-                "Z_real_col": z_real_col,
-                "Z_imag_col": z_imag_col
-            })
+        # Impedance Spectroscopy Path (EIS)
+        elif zr_col and zi_col:
+            out["Type"] = "EIS (Impedance)"
+            out["zr_col"] = zr_col
+            out["zi_col"] = zi_col
 
-            if r_ct > tolerance_settings["max_rct"]:
-                res["Status"] = "FAIL"
-                res["Flags"].append("High Charge Transfer Resistance (Rct)")
+            df[zr_col] = pd.to_numeric(df[zr_col], errors='coerce')
+            df[zi_col] = pd.to_numeric(df[zi_col], errors='coerce')
+            df.dropna(subset=[zr_col, zi_col], inplace=True)
+
+            zr = df[zr_col].values
+            zi = np.abs(df[zi_col].values) # -Z'' normalized to positive
+
+            rs = zr.min() # Solution Resistance approx at high freq
+            rct = zr.max() - rs # Charge Transfer Resistance footprint
+
+            out.update({"Rs": rs, "Rct": rct})
+
+            if rct > settings["max_rct"]:
+                out["Status"] = "FAIL"
+                out["Flags"].append("High Charge Transfer Resistance (Rct)")
 
         else:
-            res["Status"] = "FAIL"
-            res["Flags"].append("Unrecognized Data Scheme")
+            out["Status"] = "FAIL"
+            out["Flags"].append("Column Mapping Error (Potential/Current/Z not found)")
 
-        return res, df
+        return out
 
     except Exception as e:
-        return {
-            "Filename": filename, "Status": "ERROR", "Flags": [str(e)],
-            "Type": "Unknown", "Peak_Anodic_I": 0, "Peak_Cathodic_I": 0,
-            "Delta_Ep": 0, "SNR": 0, "R_ct_Approx": 0
-        }, None
-
-def safe_div(n, d, default=0.0):
-    try:
-        return n / d if d != 0 else default
-    except:
-        return default
+        return {"Filename": filename, "Status": "ERROR", "Flags": [str(e)], "Type": "Unknown", "df": None}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. INTERPRETATION & EXPORT ENGINE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def dataframe_to_markdown_table(df_sub):
-    headers = list(df_sub.columns)
-    header_row = "| " + " | ".join(headers) + " |"
-    sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
-    data_rows = []
-    for _, row in df_sub.iterrows():
-        r_str = [str(val) for val in row.values]
-        data_rows.append("| " + " | ".join(r_str) + " |")
-    return "\n".join([header_row, sep_row] + data_rows)
-
-def generate_echem_thesis(res, tier):
-    st.subheader(f"⚡ Technical Diagnostic — {res['Filename']}")
-    
-    if res["Status"] == "PASS":
-        st.markdown("<div class='status-pass'>🟢 QUALIFIED: Meets Electroanalytical Specs</div>", unsafe_allow_html=True)
-    else:
-        st.markdown("<div class='status-fail'>🔴 REJECTED: Out of Specification</div>", unsafe_allow_html=True)
-        
-    st.write("")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Anodic Peak Current ($I_{pa}$)", f"{res['Peak_Anodic_I']:.4e}")
-    c2.metric("Peak Splitting ($\Delta E_p$)", f"{res['Delta_Ep']:.3f} V")
-    c3.metric("Signal-to-Noise Ratio", f"{res['SNR']:.1f}")
-
-    st.markdown("**🔍 Diagnostic Breakdown:**")
-    if tier == "🌱 Operator":
-        st.write(f"- **Current Peak:** The curve reached a top response of `{res['Peak_Anodic_I']:.2e}`.")
-        st.write(f"- **Noise Quality:** Signal-to-noise is at `{res['SNR']:.1f}`.")
-    elif tier == "📈 Lab Technologist":
-        st.write(f"- **Reversibility Check:** Peak separation is $\Delta E_p = {res['Delta_Ep']:.3f}\text{{ V}}$. Lower value indicates faster electron transfer kinetics.")
-        st.write(f"- **Identified Flags:** {', '.join(res['Flags']) if res['Flags'] else 'None'}")
-    else:
-        st.write(f"- **Kinetic Analysis:** Nernstian ideal behavior targets $\Delta E_p \sim 59/n\text{{ mV}}$. Observed splitting indicates transfer limits or uncompensated resistance ($R_u$).")
-        st.write(f"- **R_ct Estimation:** Implied impedance footprint: `{res['R_ct_Approx']:.2f} \Omega`.")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. MAIN UI LAYOUT
+# 3. INTERACTIVE CONTROL SIDEBAR
 # ─────────────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
-    st.header("📂 Batch File Ingestion")
-    uploads = st.file_uploader("Upload Potentiostat Runs (CSV/XLSX)", accept_multiple_files=True)
-    st.divider()
+    st.header("⚡ Hardware & Threshold Controls")
     
-    st.header("⚙️ Quality Control Thresholds")
-    min_peak_diff = st.number_input("Min Peak-to-Peak Current Span", value=1e-5, format="%.6f")
-    max_delta_ep = st.number_input("Max Peak Splitting ΔEp (V)", value=0.200, step=0.01)
-    min_snr = st.slider("Minimum Acceptable SNR", 2.0, 100.0, 10.0)
-    prominence = st.number_input("Peak Detection Prominence", value=1e-6, format="%.7f")
-    max_rct = st.number_input("Max Charge Transfer Res Rct (Ω)", value=1000.0, step=50.0)
+    st.subheader("Voltammetry Tolerances")
+    min_span = st.number_input("Min Peak-to-Peak Current Span (A)", value=1e-5, format="%.6f")
+    max_dep = st.number_input("Max Peak Splitting ΔEp (V)", value=0.150, step=0.010)
+    min_snr = st.slider("Minimum Signal-to-Noise (SNR)", 2.0, 100.0, 10.0)
     
+    st.subheader("EIS Tolerances")
+    max_rct = st.number_input("Max Permissible Rct (Ω)", value=500.0, step=50.0)
+
+    st.subheader("Signal Preprocessing")
+    smooth_sig = st.checkbox("Apply Savitzky-Golay Filtering", value=True)
+    prominence = st.number_input("Peak Sensitivity Prominence", value=1e-6, format="%.7f")
+
     st.divider()
-    complexity = st.radio("Analytics Detail Level:", ["🌱 Operator", "📈 Lab Technologist", "🏛️ Electrochemical Scientist"])
+    uploads = st.file_uploader("Upload Electrochemical Sweeps", type=["csv", "txt", "mpt", "xlsx"], accept_multiple_files=True)
 
-st.markdown("<h1 class='hero-title'>⚡ Electrochemical Quality Terminal</h1>", unsafe_allow_html=True)
-st.markdown(f"<p class='hero-subtitle'>Batch Voltammetry & Impedance Auditor — Mode: <b>{complexity}</b></p>", unsafe_allow_html=True)
+st.title("⚡ Electrochemical Quality Terminal")
+st.caption("Automated Batch Diagnostics for Cyclic Voltammetry, LSV, and Impedance Spectroscopy")
 
-tolerance_settings = {
-    "min_peak_diff": min_peak_diff,
-    "max_delta_ep": max_delta_ep,
-    "min_snr": min_snr,
-    "prominence": prominence,
-    "max_rct": max_rct
+settings = {
+    "min_span": min_span, "max_dep": max_dep, "min_snr": min_snr,
+    "max_rct": max_rct, "smooth": smooth_sig, "prominence": prominence
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. PROCESSING AND MULTI-VIEW DASHBOARD
+# ─────────────────────────────────────────────────────────────────────────────
+
 if uploads:
-    results = []
-    raw_files = []
-    
+    runs = []
+    zip_bytes = io.BytesIO()
+
     for up in uploads:
-        content = up.getvalue()
-        res, parsed_df = parse_and_analyze_echem(content, up.name, tolerance_settings)
-        if res:
-            results.append((res, parsed_df))
-            raw_files.append((up.name, content))
+        res = process_echem_file(up.getvalue(), up.name, settings)
+        runs.append(res)
 
-    if results:
-        res_list = [r[0] for r in results]
-        df_summary = pd.DataFrame(res_list)
+    summary_data = []
+    for r in runs:
+        summary_data.append({
+            "Filename": r["Filename"],
+            "Type": r["Type"],
+            "Status": r["Status"],
+            "I_pa (A)": f"{r['I_pa']:.3e}" if r['Type'].startswith("Volt") else "N/A",
+            "ΔEp (V)": f"{r['Delta_Ep']:.3f}" if r['Type'].startswith("Volt") else "N/A",
+            "SNR": f"{r['SNR']:.1f}" if r['Type'].startswith("Volt") else "N/A",
+            "Rct (Ω)": f"{r['Rct']:.2f}" if r['Type'].startswith("EIS") else "N/A",
+            "Anomalies": ", ".join(r["Flags"]) if r["Flags"] else "None"
+        })
 
-        tab_matrix, tab_deep, tab_risk, tab_visual, tab_export = st.tabs([
-            "📊 Quality Matrix", "🔍 Curve Deep-Dive", "🛡️ Kinetic / Signal Risk", "📈 Voltammetric Visuals", "📄 Export"
-        ])
+    summary_df = pd.DataFrame(summary_data)
 
-        with tab_matrix:
-            st.subheader("Batch Inspection Output")
-            display_cols = ["Filename", "Type", "Status", "Peak_Anodic_I", "Peak_Cathodic_I", "Delta_Ep", "SNR", "R_ct_Approx"]
-            st.dataframe(
-                df_summary[display_cols].style.map(
-                    lambda v: 'color: #10b981; font-weight: bold;' if v == 'PASS' else ('color: #ef4444; font-weight: bold;' if v == 'FAIL' else ''),
-                    subset=['Status']
-                ), use_container_width=True
-            )
+    # Top KPI Row
+    total_runs = len(runs)
+    passed_runs = sum(1 for r in runs if r["Status"] == "PASS")
+    failed_runs = sum(1 for r in runs if r["Status"] == "FAIL")
 
-        with tab_deep:
-            selection = st.selectbox("Select Run for Deep-Dive:", df_summary["Filename"].unique())
-            sel_tuple = next(r for r in results if r[0]["Filename"] == selection)
-            generate_echem_thesis(sel_tuple[0], complexity)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Batch Count", total_runs)
+    col2.metric("Passed Spec", passed_runs)
+    col3.metric("Failed Spec", failed_runs, delta_color="inverse")
+    col4.metric("Yield Rate", f"{(passed_runs/total_runs)*100:.1f}%")
 
-        with tab_risk:
-            st.subheader("🚨 Automated Failure Mode Flags")
-            for r in res_list:
-                with st.expander(f"Run: {r['Filename']} — Status: {r['Status']}"):
-                    if r["Flags"]:
-                        for flag in r["Flags"]:
-                            st.error(f"Flagged: {flag}")
-                    else:
-                        st.success("Clean response signal — All parameters fall within established tolerances.")
+    tab_summary, tab_overlay, tab_single, tab_export = st.tabs([
+        "📋 QC Inspection Table", "📈 Multi-Curve Overlay", "🔍 Single-Curve Diagnostics", "💾 Export & Reports"
+    ])
 
-        with tab_visual:
-            c1, c2 = st.columns(2)
-            with c1:
-                selected_file = st.selectbox("Select Curve to Plot:", df_summary["Filename"].unique(), key="plot_select")
-                target_tuple = next(r for r in results if r[0]["Filename"] == selected_file)
-                meta, df_curve = target_tuple
-                
-                fig = go.Figure()
-                if meta["Type"] == "CV/Voltammetry" and df_curve is not None:
-                    fig.add_trace(go.Scatter(x=df_curve[meta["V_col"]], y=df_curve[meta["I_col"]], mode='lines', name='Voltammogram', line=dict(color='#10b981')))
-                    fig.update_layout(title=f"Cyclic Voltammogram — {selected_file}", xaxis_title="Potential (V)", yaxis_title="Current (A)", template="plotly_dark")
-                elif meta["Type"] == "EIS" and df_curve is not None:
-                    fig.add_trace(go.Scatter(x=df_curve[meta["Z_real_col"]], y=-df_curve[meta["Z_imag_col"]], mode='lines+markers', name='Nyquist Plot', line=dict(color='#3b82f6')))
-                    fig.update_layout(title=f"Nyquist Plot — {selected_file}", xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)", template="plotly_dark")
-                
-                st.plotly_chart(fig, use_container_width=True)
+    with tab_summary:
+        st.subheader("Batch Quality Overview")
+        st.dataframe(
+            summary_df.style.map(
+                lambda v: 'background-color: rgba(16, 185, 129, 0.2); color: #10b981; font-weight: bold;' if v == 'PASS' 
+                else ('background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight: bold;' if v == 'FAIL' else ''),
+                subset=['Status']
+            ), use_container_width=True
+        )
 
-            with c2:
-                fig2 = px.scatter(
-                    df_summary, x="Delta_Ep", y="SNR", color="Status", 
-                    size=np.abs(df_summary["Peak_Anodic_I"]) + 1e-9, 
-                    hover_name="Filename", title="Signal Fidelity vs. Peak Splitting"
-                )
-                fig2.update_layout(template="plotly_dark")
-                st.plotly_chart(fig2, use_container_width=True)
+    with tab_overlay:
+        st.subheader("Multi-Run Visual Comparison")
+        fig_over = go.Figure()
 
-        with tab_export:
-            st.subheader("📄 Generate Batch Quality Report")
-            report_md = f"# ELECTROCHEMICAL BATCH QC REPORT\nMode: {complexity}\nGenerated: {datetime.now()}\n\n"
-            report_md += dataframe_to_markdown_table(df_summary[["Filename", "Type", "Status", "Delta_Ep", "SNR"]])
-            
-            st.download_button("📥 Download Report (.md)", data=report_md, file_name=f"Echem_QC_Report_{datetime.now().strftime('%Y%m%d')}.md")
-            
-            zip_io = io.BytesIO()
-            with zipfile.ZipFile(zip_io, 'w') as zf:
-                for fname, content in raw_files: 
-                    zf.writestr(f"Audited_{fname}", content)
-            st.download_button("📥 Download Data Package (.zip)", data=zip_io.getvalue(), file_name="Echem_Batch_Data.zip")
+        for r in runs:
+            if r["df"] is not None:
+                df_curr = r["df"]
+                if r["Type"].startswith("Volt"):
+                    y_plot = df_curr["I_Filtered"] if "I_Filtered" in df_curr.columns else df_curr[r["i_col"]]
+                    fig_over.add_trace(go.Scatter(x=df_curr[r["v_col"]], y=y_plot, mode='lines', name=r["Filename"]))
+                    fig_over.update_layout(xaxis_title="Potential (V)", yaxis_title="Current (A)")
+                elif r["Type"].startswith("EIS"):
+                    fig_over.add_trace(go.Scatter(x=df_curr[r["zr_col"]], y=-df_curr[r["zi_col"]], mode='lines+markers', name=r["Filename"]))
+                    fig_over.update_layout(xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)")
+
+        fig_over.update_layout(template="plotly_dark", height=500)
+        st.plotly_chart(fig_over, use_container_width=True)
+
+    with tab_single:
+        selected_file = st.selectbox("Select Curve for Deep Analysis:", [r["Filename"] for r in runs if r["df"] is not None])
+        target = next(r for r in runs if r["Filename"] == selected_file)
+        
+        df_t = target["df"]
+        fig_single = go.Figure()
+
+        if target["Type"].startswith("Volt"):
+            fig_single.add_trace(go.Scatter(x=df_t[target["v_col"]], y=df_t[target["i_col"]], mode='lines', name='Raw Signal', line=dict(color='#475569', width=1)))
+            if "I_Filtered" in df_t.columns:
+                fig_single.add_trace(go.Scatter(x=df_t[target["v_col"]], y=df_t["I_Filtered"], mode='lines', name='Filtered Signal (S-G)', line=dict(color='#10b981', width=2)))
+
+            # Mark Anodic and Cathodic Peaks
+            fig_single.add_trace(go.Scatter(x=[target["E_pa"]], y=[target["I_pa"]], mode='markers', marker=dict(color='#f59e0b', size=12), name='Epa (Anodic)'))
+            fig_single.add_trace(go.Scatter(x=[target["E_pc"]], y=[target["I_pc"]], mode='markers', marker=dict(color='#ef4444', size=12), name='Epc (Cathodic)'))
+            fig_single.update_layout(xaxis_title="Potential (V)", yaxis_title="Current (A)")
+
+        elif target["Type"].startswith("EIS"):
+            fig_single.add_trace(go.Scatter(x=df_t[target["zr_col"]], y=-df_t[target["zi_col"]], mode='lines+markers', name='Nyquist Arc', line=dict(color='#3b82f6')))
+            fig_single.update_layout(xaxis_title="Z' (Ω)", yaxis_title="-Z'' (Ω)")
+
+        fig_single.update_layout(template="plotly_dark", title=f"Run Analysis — {selected_file}")
+        st.plotly_chart(fig_single, use_container_width=True)
+
+    with tab_export:
+        st.subheader("Generate Audit Documents")
+        csv_rep = summary_df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download Quality Summary (CSV)", data=csv_rep, file_name=f"Echem_QC_{datetime.now().strftime('%Y%m%d')}.csv")
 
 else:
-    st.info("👋 Upload potentiostat data files (CSV or Excel) to run batch automated screening.")
+    st.info("👋 Upload CSV, TXT (BioLogic/Gamry exports), or Excel files to run automated quality checks.")

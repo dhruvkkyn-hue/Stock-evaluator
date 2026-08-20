@@ -1,15 +1,6 @@
-import sys
-import subprocess
-
-# Auto-install yfinance if missing in Streamlit Cloud environment
-try:
-    import yfinance as yf
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "yfinance"])
-    import yfinance as yf
-
 import streamlit as st
 import pandas as pd
+import yfinance as yf
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime

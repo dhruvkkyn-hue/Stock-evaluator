@@ -43,49 +43,87 @@ def safe_div(n, d, default=0.0):
 def fetch_stock_data(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        info = ticker.info
-        if not info or ('shortName' not in info and 'longName' not in info):
-            return None
-            
-        financials = ticker.financials
+
+        # Primary attempt: detailed info
+        info = ticker.info or {}
+        # Secondary attempt: fast_info (lighter, may have key fields)
+        fast_info = getattr(ticker, "fast_info", {}) or {}
+        # Third attempt: recent price from history
+        hist = ticker.history(period="1d")
+        recent_price = None
+        if not hist.empty:
+            recent_price = hist["Close"].iloc[-1]
+
+        # Helper to pull a value from info → fast_info → default
+        def get_metric(key, alt_key=None, default=None):
+            if key in info and info[key] not in (None, "", {}):
+                return info[key]
+            if alt_key and alt_key in info and info[alt_key] not in (None, "", {}):
+                return info[alt_key]
+            if key in fast_info and fast_info[key] not in (None, "", {}):
+                return fast_info[key]
+            if alt_key and alt_key in fast_info and fast_info[alt_key] not in (None, "", {}):
+                return fast_info[alt_key]
+            return default
+
+        # Essential fundamentals with fallbacks
+        market_cap = get_metric("marketCap", default=0.0)
+        pe_ratio = get_metric("trailingPE", default=0.0)
+        roe_raw = get_metric("returnOnEquity", default=None)
+        roe = roe_raw * 100 if isinstance(roe_raw, (int, float)) else 0.0
+
+        total_debt = get_metric("totalDebt", default=0.0)
+        total_equity = get_metric("totalStockholderEquity", default=0.0)
+
+        # If balance_sheet provides equity, use it as fallback
         balance_sheet = ticker.balance_sheet
-        cashflow = ticker.cashflow
-        
-        market_cap = info.get('marketCap', 0.0)
-        pe_ratio = info.get('trailingPE', 0.0)
-        roe = info.get('returnOnEquity', 0.0) * 100 if info.get('returnOnEquity') else 0.0
-        
-        total_debt = info.get('totalDebt', 0.0)
-        total_equity = info.get('totalStockholderEquity', 0.0)
-        if not total_equity and not balance_sheet.empty and 'Stockholders Equity' in balance_sheet.index:
-            total_equity = balance_sheet.loc['Stockholders Equity'].iloc[0]
-            
+        if not total_equity and not balance_sheet.empty and "Stockholders Equity" in balance_sheet.index:
+            total_equity = balance_sheet.loc["Stockholders Equity"].iloc[0]
+
         de_ratio = safe_div(total_debt, total_equity)
-        
+
+        cashflow = ticker.cashflow
         cfo = 0.0
-        if not cashflow.empty and 'Operating Cash Flow' in cashflow.index:
-            cfo = cashflow.loc['Operating Cash Flow'].iloc[0]
-            
+        if not cashflow.empty and "Operating Cash Flow" in cashflow.index:
+            cfo = cashflow.loc["Operating Cash Flow"].iloc[0]
+
         capex = 0.0
-        if not cashflow.empty and 'Capital Expenditure' in cashflow.index:
-            capex = abs(cashflow.loc['Capital Expenditure'].iloc[0])
-            
+        if not cashflow.empty and "Capital Expenditure" in cashflow.index:
+            capex = abs(cashflow.loc["Capital Expenditure"].iloc[0])
+
         fcf = cfo - capex
         fcf_yield = safe_div(fcf, market_cap) * 100
-        
-        sector = info.get('sector', 'Industrial')
-        is_fin = 'Financial' in sector or 'Bank' in sector
-        
+
+        sector = get_metric("sector", default="Industrial")
+        is_fin = "Financial" in sector or "Bank" in sector
+
+        # Piotroski-like score components
         p_score = 0
-        if info.get('netIncomeToCommon', 0) > 0: p_score += 1
-        if cfo > 0: p_score += 1
-        if cfo > info.get('netIncomeToCommon', 0): p_score += 1
-        if roe > 10: p_score += 1
-        if de_ratio < 1.0: p_score += 1
-        if fcf > 0: p_score += 1
-        
+        net_income = get_metric("netIncomeToCommon", default=0)
+        if net_income > 0:
+            p_score += 1
+        if cfo > 0:
+            p_score += 1
+        if cfo > net_income:
+            p_score += 1
+        if roe > 10:
+            p_score += 1
+        if de_ratio < 1.0:
+            p_score += 1
+        if fcf > 0:
+            p_score += 1
+
+        price = get_metric("currentPrice", "navPrice", default=recent_price or 0.0)
+
+        # Company name fallback chain
+        company_name = info.get("shortName") or info.get("longName") or fast_info.get("shortName") or symbol.upper()
+
+        # Validate that we have at least a price and symbol
+        if price is None or price == 0.0:
+            return None
+
         return {
-            "Company": info.get('shortName', info.get('longName', symbol)),
+            "Company": company_name,
             "Symbol": symbol.upper(),
             "Sector": sector,
             "Is_Financial": is_fin,
@@ -95,7 +133,7 @@ def fetch_stock_data(symbol):
             "D/E": de_ratio,
             "FCF Yield %": fcf_yield,
             "Piotroski": p_score,
-            "Price": info.get('currentPrice', info.get('navPrice', 0.0))
+            "Price": price,
         }
     except Exception:
         return None
@@ -117,9 +155,13 @@ for sym in ticker_list:
 
 if results:
     df = pd.DataFrame(results)
-    
+
     tab_matrix, tab_deep, tab_thesis, tab_risk, tab_visual = st.tabs([
-        "📊 Master Matrix", "🔍 Metric Deep-Dive", "🏛️ Bull & Bear Thesis", "🛡️ Forensic Risk", "📈 Visuals"
+        "📊 Master Matrix",
+        "🔍 Metric Deep-Dive",
+        "🏛️ Bull & Bear Thesis",
+        "🛡️ Forensic Risk",
+        "📈 Visuals",
     ])
 
     with tab_matrix:
@@ -137,7 +179,7 @@ if results:
     with tab_thesis:
         for _, row in df.iterrows():
             st.subheader(f"{row['Company']} ({row['Symbol']})")
-            if row['Piotroski'] >= 4 and row['ROE %'] > 12:
+            if row["Piotroski"] >= 4 and row["ROE %"] > 12:
                 st.success("Verdict: STRONG BUY / ACCUMULATE")
             else:
                 st.warning("Verdict: HOLD / WATCHLIST")
@@ -148,7 +190,14 @@ if results:
             st.write(f"**{row['Company']}**: Piotroski Score = {row['Piotroski']}/6")
 
     with tab_visual:
-        fig = px.scatter(df, x="PE", y="ROE %", size="Market Cap", hover_name="Company", title="Valuation vs Return on Equity")
+        fig = px.scatter(
+            df,
+            x="PE",
+            y="ROE %",
+            size="Market Cap",
+            hover_name="Company",
+            title="Valuation vs Return on Equity",
+        )
         fig.update_layout(template="plotly_dark")
         st.plotly_chart(fig, use_container_width=True)
 else:

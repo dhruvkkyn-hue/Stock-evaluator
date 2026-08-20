@@ -5,7 +5,7 @@ import requests
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-st.set_page_config(page_title="NSE Algo-Quant Terminal", layout="wide", page_icon="🇮🇳")
+st.set_page_config(page_title="NSE Institutional Quant & Execution Terminal", layout="wide", page_icon="🇮🇳")
 
 st.markdown("""
 <style>
@@ -72,7 +72,7 @@ def process_single_ticker(symbol):
 
     ticker = yf.Ticker(symbol)
     
-    # 1. Price Resolution Engine
+    # 1. Price Fast Fetch
     price = 0.0
     try:
         price = float(ticker.fast_info.last_price or 0.0)
@@ -81,13 +81,12 @@ def process_single_ticker(symbol):
 
     if price == 0.0:
         try:
-            hist = ticker.history(period="5d")
+            hist = ticker.history(period="5d", timeout=3)
             if not hist.empty and 'Close' in hist.columns:
                 price = float(hist['Close'].iloc[-1])
         except Exception:
             pass
 
-    # REST Fallback if price remains unresolved
     if price == 0.0:
         try:
             url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
@@ -100,9 +99,9 @@ def process_single_ticker(symbol):
             pass
 
     if price == 0.0:
-        return None  # Cannot process asset without price
+        return None
 
-    # 2. Extract Info Dictionary safely
+    # 2. Extract Info safely
     info = {}
     try:
         info = ticker.info or {}
@@ -113,14 +112,25 @@ def process_single_ticker(symbol):
     sector = info.get('sector', 'General Market')
     is_financial = any(k in sector.lower() or k in company_name.lower() for k in ['bank', 'financial', 'insurance', 'holding', 'capital'])
 
-    # 3. Balance Sheet & Statements Parsing
+    # 3. Parse Balance Sheet & Income Statements
     bs = pd.DataFrame()
     financials = pd.DataFrame()
     cf = pd.DataFrame()
     
-    try: bs = ticker.balance_sheet except Exception: pass
-    try: financials = ticker.financials except Exception: pass
-    try: cf = ticker.cashflow except Exception: pass
+    try:
+        bs = ticker.balance_sheet
+    except Exception:
+        pass
+        
+    try:
+        financials = ticker.financials
+    except Exception:
+        pass
+        
+    try:
+        cf = ticker.cashflow
+    except Exception:
+        pass
 
     market_cap = float(info.get('marketCap', 0.0) or ticker.fast_info.market_cap or 0.0)
     shares_outstanding = float(info.get('sharesOutstanding', 0.0) or 0.0)
@@ -128,7 +138,7 @@ def process_single_ticker(symbol):
     if shares_outstanding == 0.0 and market_cap > 0 and price > 0:
         shares_outstanding = safe_div(market_cap, price)
 
-    # Fundamental Extracts
+    # Core Metrics Extraction
     net_income = extract_financial_metric(financials, [
         'Net Income Common Stockholders', 'Net Income', 
         'Net Income From Continuing Operation Net Minority Interest'
@@ -138,7 +148,7 @@ def process_single_ticker(symbol):
     if eps == 0.0 and net_income > 0 and shares_outstanding > 0:
         eps = safe_div(net_income, shares_outstanding)
 
-    # Multi-Stage P/E Precision Engine
+    # Multi-Stage P/E Resolution
     pe_ratio = float(info.get('trailingPE', 0.0) or info.get('forwardPE', 0.0) or 0.0)
     if pe_ratio == 0.0 and price > 0 and eps > 0:
         pe_ratio = safe_div(price, eps)
@@ -160,7 +170,7 @@ def process_single_ticker(symbol):
     cfo = extract_financial_metric(cf, ['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities']) or float(info.get('operatingCashflow', 0.0) or 0.0)
     capex = abs(extract_financial_metric(cf, ['Capital Expenditure', 'Investments In Property Plant And Equipment']))
     
-    # 4. Precision ROE & FCF Yield
+    # 4. Precision Calculations
     roe = float(info.get('returnOnEquity', 0.0) or 0.0) * 100
     if roe == 0.0 and total_equity > 0 and net_income != 0.0:
         roe = safe_div(net_income, total_equity) * 100
@@ -174,7 +184,7 @@ def process_single_ticker(symbol):
 
     fcf_yield = safe_div(fcf, market_cap) * 100 if market_cap > 0 else 0.0
 
-    # 5. Quantitative Models
+    # 5. Emerging Market Quant Models
     retained_earnings = extract_financial_metric(bs, ['Retained Earnings'])
     x1 = safe_div(working_cap, total_assets)
     x2 = safe_div(retained_earnings, total_assets)
@@ -206,7 +216,7 @@ def process_single_ticker(symbol):
     if asset_turnover > 0.4 or is_financial: p_score += 1
     if safe_div(working_cap, total_assets) > 0 or is_financial: p_score += 1
 
-    # Composite Quant Rating Engine (0-100 Score)
+    # Composite Factor Rating (0-100 Score)
     factor_score = 0
     if roe >= 18: factor_score += 25
     elif roe >= 12: factor_score += 15
@@ -284,7 +294,7 @@ def process_single_ticker(symbol):
 def fetch_all_quant_data(ticker_list):
     results = []
     failed = []
-    with ThreadPoolExecutor(max_workers=min(len(ticker_list), 8)) as executor:
+    with ThreadPoolExecutor(max_workers=min(len(ticker_list), 6)) as executor:
         future_to_symbol = {executor.submit(process_single_ticker, sym): sym for sym in ticker_list}
         for future in as_completed(future_to_symbol):
             sym = future_to_symbol[future]
@@ -298,11 +308,11 @@ def fetch_all_quant_data(ticker_list):
                 failed.append(sym)
     return results, failed
 
-# Streamlit Interface
+# UI Layout
 with st.sidebar:
     st.header("NSE / BSE Algorithmic Engine")
     symbols_input = st.text_input("NSE Tickers (comma separated):", value="RELIANCE, TCS, HDFCBANK, INFY, TATAMOTORS, ICICIBANK, LT")
-    st.caption("Auto-recovers missing P/E ratios and parses banking balance sheets seamlessly.")
+    st.caption("Parallel Multi-Thread Engine active with timeout bounds.")
 
 st.markdown("<h1 class='hero-title'>Indian Institutional Quantitative Terminal</h1>", unsafe_allow_html=True)
 

@@ -1,200 +1,250 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import time
-import plotly.graph_objects as go
+import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. UI/UX: HIGH-DENSITY HFT TERMINAL CSS
-# ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="HFT Execution Engine Pro", 
-    layout="wide", 
-    page_icon="⚡",
-    initial_sidebar_state="expanded"
-)
+# ==========================================
+# PAGE CONFIGURATION & STYLING
+# ==========================================
+st.set_page_config(page_title="NSE Standalone Quant Engine", layout="wide", page_icon="📈")
 
 st.markdown("""
 <style>
-    :root {
-        --bg-dark: #050811;
-        --card-bg: #0e1626;
-        --border-color: #1b273e;
-        --accent-green: #00e676;
-        --accent-red: #ff1744;
-        --accent-cyan: #00e5ff;
-    }
-    .stApp { background-color: var(--bg-dark); color: #e2e8f0; }
-    
+    .stApp { background-color: #0e1117; color: #c9d1d9; }
     div[data-testid="stMetric"] {
-        background-color: var(--card-bg);
-        border: 1px solid var(--border-color);
+        background-color: #161b22;
+        border: 1px solid #30363d;
         padding: 12px;
-        border-radius: 6px;
+        border-radius: 8px;
     }
-    .stTabs [data-baseweb="tab-list"] { gap: 6px; }
-    .stTabs [data-baseweb="tab"] {
-        background-color: var(--card-bg);
-        border: 1px solid var(--border-color);
-        padding: 6px 16px;
-        border-radius: 4px 4px 0 0;
-        font-family: monospace;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: var(--accent-cyan) !important;
-        color: #000000 !important;
-        font-weight: bold;
+    .hero-title {
+        font-size: 1.8rem;
+        font-weight: 800;
+        color: #ff9933;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. VECTORIZED HFT STRATEGY ENGINE & LATENCY OPTIMIZER
-# ─────────────────────────────────────────────────────────────────────────────
+# ==========================================
+# IN-MEMORY PAPER LEDGER (NO DATABASE/API REQ)
+# ==========================================
+if "cash_balance" not in st.session_state:
+    st.session_state.cash_balance = 1000000.0  # ₹10,000,00 Virtual Capital
+if "portfolio" not in st.session_state:
+    st.session_state.portfolio = {}  # {symbol: {qty, avg_price, sl, target}}
+if "trade_log" not in st.session_state:
+    st.session_state.trade_log = []
 
-def generate_synthetic_hft_ticks(num_ticks=10000):
-    """Generates microsecond-level tick data for ultra-fast backtesting."""
-    np.random.seed(42)
-    price_changes = np.random.normal(0, 0.05, num_ticks)
-    prices = 100 + np.cumsum(price_changes)
-    bid_ask_spread = np.random.uniform(0.01, 0.03, num_ticks)
+# ==========================================
+# MARKET DATA & QUANT ALGORITHM ENGINE
+# ==========================================
+def safe_div(n, d, default=0.0):
+    try:
+        if d is None or n is None: return default
+        n_val, d_val = float(n), float(d)
+        return n_val / d_val if d_val != 0 else default
+    except Exception:
+        return default
+
+def process_ticker(symbol):
+    sym_clean = symbol.strip().upper()
+    ticker_sym = sym_clean if sym_clean.endswith(".NS") or sym_clean.endswith(".BO") else f"{sym_clean}.NS"
+    ticker = yf.Ticker(ticker_sym)
+
+    price = 0.0
+    try:
+        price = float(ticker.fast_info.last_price or 0.0)
+    except Exception:
+        pass
+
+    if price == 0.0:
+        try:
+            hist = ticker.history(period="5d")
+            if not hist.empty:
+                price = float(hist['Close'].iloc[-1])
+        except Exception:
+            pass
+
+    if price == 0.0:
+        return None
+
+    info = {}
+    try:
+        info = ticker.info or {}
+    except Exception:
+        pass
+
+    company_name = info.get('shortName', sym_clean)
+    market_cap = float(info.get('marketCap', 0.0) or ticker.fast_info.market_cap or 0.0)
     
-    bids = prices - (bid_ask_spread / 2)
-    asks = prices + (bid_ask_spread / 2)
-    volumes = np.random.randint(100, 5000, size=num_ticks)
-    
-    df = pd.DataFrame({
-        "Tick": np.arange(num_ticks),
-        "Mid_Price": prices,
-        "Bid": bids,
-        "Ask": asks,
-        "Spread": bid_ask_spread,
-        "Volume": volumes
-    })
-    return df
+    eps = float(info.get('trailingEps', 0.0) or info.get('forwardEps', 0.0) or 0.0)
+    pe_ratio = float(info.get('trailingPE', 0.0) or info.get('forwardPE', 0.0) or 0.0)
+    if pe_ratio == 0 and price > 0 and eps > 0:
+        pe_ratio = safe_div(price, eps)
 
-def run_hft_execution_backtest(df, lookback_window, entry_threshold, stop_loss_pct):
-    """
-    Vectorized Order Book Imbalance & Mean Reversion Strategy Engine.
-    Optimized for high-speed calculation to keep latency sub-millisecond.
-    """
-    start_time = time.perf_counter_ns()
+    roe = float(info.get('returnOnEquity', 0.0) or 0.0) * 100
 
-    # Vectorized Rolling Window Calculation (Ultra-Fast execution)
-    df['Rolling_Mean'] = df['Mid_Price'].rolling(window=lookback_window).mean()
-    df['Rolling_Std'] = df['Mid_Price'].rolling(window=lookback_window).std()
-    
-    # Z-Score Computation for Micro-Spread Arbitrage
-    df['Z_Score'] = (df['Mid_Price'] - df['Rolling_Mean']) / (df['Rolling_Std'] + 1e-9)
+    # QUANTITATIVE SCORING ALGORITHM (0 - 100 Points)
+    score = 0
+    if 0 < pe_ratio <= 25: score += 40
+    elif 25 < pe_ratio <= 40: score += 20
 
-    # Signal Generation: +1 BUY, -1 SELL, 0 HOLD
-    df['Signal'] = 0
-    df.loc[df['Z_Score'] < -entry_threshold, 'Signal'] = 1   # Oversold -> Buy Limit
-    df.loc[df['Z_Score'] > entry_threshold, 'Signal'] = -1   # Overbought -> Short Limit
+    if roe >= 18: score += 40
+    elif roe >= 12: score += 25
+    elif roe > 0: score += 10
 
-    # Fast Position & PnL Vectorization
-    df['Position'] = df['Signal'].shift(1).fillna(0)
-    df['Returns'] = df['Mid_Price'].pct_change().fillna(0)
-    df['Strategy_Returns'] = df['Position'] * df['Returns']
-    df['Cumulative_PnL'] = (1 + df['Strategy_Returns']).cumprod() - 1
+    if market_cap > 50000000000:  # Large Cap (>5,000 Cr) Stability Bonus
+        score += 20
 
-    # Latency tracking (Nanoseconds to Milliseconds conversion)
-    end_time = time.perf_counter_ns()
-    execution_time_ms = (end_time - start_time) / 1e6
+    if score >= 60:
+        signal = "BUY"
+    elif score <= 30:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
 
-    # Trade Metrics Calculation
-    trades = df[df['Signal'] != 0]
-    num_trades = len(trades)
-    win_rate = (df['Strategy_Returns'] > 0).sum() / max(num_trades, 1) * 100
-    total_pnl = df['Cumulative_PnL'].iloc[-1] * 100
-    sharpe_ratio = (df['Strategy_Returns'].mean() / (df['Strategy_Returns'].std() + 1e-9)) * np.sqrt(252 * 7800) # Intraday annualization
-
-    return df, {
-        "Execution_Time_ms": execution_time_ms,
-        "Total_Trades": num_trades,
-        "Win_Rate_%": win_rate,
-        "Total_PnL_%": total_pnl,
-        "Sharpe_Ratio": sharpe_ratio
+    return {
+        "Company": company_name,
+        "Symbol": sym_clean,
+        "Price": price,
+        "PE": pe_ratio,
+        "ROE %": roe,
+        "Quant Score": score,
+        "Signal": signal
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. SIDEBAR ALGORITHMIC PARAMETERS
-# ─────────────────────────────────────────────────────────────────────────────
+def fetch_watchlist_data(ticker_list):
+    results = []
+    with ThreadPoolExecutor(max_workers=min(len(ticker_list), 6)) as executor:
+        future_map = {executor.submit(process_ticker, sym): sym for sym in ticker_list}
+        for future in as_completed(future_map):
+            res = future.result()
+            if res:
+                results.append(res)
+    return results
+
+# ==========================================
+# DASHBOARD INTERFACE
+# ==========================================
+st.markdown("<h1 class='hero-title'>NSE Local Paper Trading Terminal</h1>", unsafe_allow_html=True)
+st.caption("No Demat Account or Broker API Keys Required")
+
 with st.sidebar:
-    st.header("⚡ HFT Engine Controls")
-    
-    st.subheader("Data & Streaming Source")
-    data_mode = st.radio("Tick Data Feed:", ["Synthetic HFT Stream", "Upload Real Tick CSV"])
-    num_ticks = st.number_input("Number of Simulated Ticks", value=10000, step=1000)
-    
-    st.subheader("Algorithmic Strategy Inputs")
-    lookback = st.slider("Micro-Lookback Window (Ticks)", 5, 200, 20)
-    z_threshold = st.slider("Z-Score Entry Threshold", 0.5, 3.5, 1.5, step=0.1)
-    stop_loss = st.number_input("Hardware Stop Loss (%)", value=0.05, step=0.01)
+    st.header("⚙️ Settings")
+    symbols_input = st.text_input(
+        "Watchlist Tickers (NSE):", 
+        value="RELIANCE, TCS, HDFCBANK, INFY, TATAMOTORS, ICICIBANK"
+    )
+    if st.button("Reset Portfolio Balance"):
+        st.session_state.cash_balance = 1000000.0
+        st.session_state.portfolio = {}
+        st.session_state.trade_log = []
+        st.rerun()
 
-    st.divider()
-    uploaded_ticks = None
-    if data_mode == "Upload Real Tick CSV":
-        uploaded_ticks = st.file_uploader("Upload Raw Order Book / Tick Data", type=["csv"])
+ticker_list = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. EXECUTION TERMINAL & METRICS
-# ─────────────────────────────────────────────────────────────────────────────
-st.title("⚡ Ultra-Low Latency HFT Execution Terminal")
-st.caption("Sub-Millisecond Vectorized Backtesting & Automated Algorithmic Strategy Optimizer")
+if ticker_list:
+    with st.spinner("Fetching live market prices & running quant calculations..."):
+        market_data = fetch_watchlist_data(ticker_list)
 
-# Load Tick Stream
-if uploaded_ticks is not None:
-    tick_df = pd.read_csv(uploaded_ticks)
-else:
-    tick_df = generate_synthetic_hft_ticks(num_ticks)
+    if market_data:
+        df = pd.DataFrame(market_data)
 
-# Run Algorithmic Execution Core
-results_df, metrics = run_hft_execution_backtest(tick_df, lookback, z_threshold, stop_loss)
+        # Portfolio Summary Metrics
+        portfolio_val = st.session_state.cash_balance
+        for sym, pos in st.session_state.portfolio.items():
+            sym_match = df[df['Symbol'] == sym]
+            c_price = sym_match['Price'].iloc[0] if not sym_match.empty else pos['avg_price']
+            portfolio_val += (pos['qty'] * c_price)
 
-# Metric KPIs
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Engine Latency", f"{metrics['Execution_Time_ms']:.3f} ms")
-c2.metric("Executed Orders", f"{metrics['Total_Trades']:,}")
-c3.metric("Win Rate", f"{metrics['Win_Rate_%']:.1f}%")
-c4.metric("Strategy PnL", f"{metrics['Total_PnL_%']:.2f}%")
-c5.metric("Sharpe Ratio", f"{metrics['Sharpe_Ratio']:.2f}")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Available Cash", f"₹{st.session_state.cash_balance:,.2f}")
+        m2.metric("Total Portfolio Value", f"₹{portfolio_val:,.2f}")
+        m3.metric("Active Holdings", len(st.session_state.portfolio))
 
-tab_charts, tab_trades, tab_orderbook, tab_export = st.tabs([
-    "📈 Live Execution & PnL", "⚡ Order Log", "📊 Micro-Structure Analysis", "💾 Export Engine State"
-])
+        tab_scan, tab_holdings, tab_logs = st.tabs(["📊 Algo Scan & Execution", "💼 My Paper Portfolio", "📜 Trade Ledger"])
 
-with tab_charts:
-    st.subheader("High-Frequency Tick Price & PnL Tracking")
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=results_df['Tick'], y=results_df['Mid_Price'], mode='lines', name='Mid Price', line=dict(color='#00e5ff', width=1)))
-    
-    # Mark Buy/Sell Signals
-    buys = results_df[results_df['Signal'] == 1]
-    sells = results_df[results_df['Signal'] == -1]
-    
-    fig.add_trace(go.Scatter(x=buys['Tick'], y=buys['Mid_Price'], mode='markers', name='BUY Signal', marker=dict(color='#00e676', size=6, symbol='triangle-up')))
-    fig.add_trace(go.Scatter(x=sells['Tick'], y=sells['Mid_Price'], mode='markers', name='SELL Signal', marker=dict(color='#ff1744', size=6, symbol='triangle-down')))
+        with tab_scan:
+            st.subheader("Quantitative Analysis & Trade Execution")
+            for _, row in df.iterrows():
+                sig = row['Signal']
+                color = "🟢" if sig == "BUY" else ("🔴" if sig == "SELL" else "🟡")
+                
+                with st.expander(f"{color} {row['Company']} ({row['Symbol']}) — ₹{row['Price']:,.2f} | Score: {row['Quant Score']}/100"):
+                    c1, c2, c3 = st.columns([1, 1, 2])
+                    c1.metric("PE Ratio", f"{row['PE']:.2f}" if row['PE'] > 0 else "N/A")
+                    c2.metric("ROE", f"{row['ROE %']:.1f}%")
 
-    fig.update_layout(template="plotly_dark", height=450, xaxis_title="Tick Counter", yaxis_title="Price ($)")
-    st.plotly_chart(fig, use_container_width=True)
+                    # Buy Execution Button
+                    if sig == "BUY" and row['Symbol'] not in st.session_state.portfolio:
+                        if c3.button(f"Execute Paper Buy for {row['Symbol']}", key=f"buy_{row['Symbol']}"):
+                            allocation = st.session_state.cash_balance * 0.15  # Allocate 15% per position
+                            qty = int(allocation // row['Price'])
+                            
+                            if qty > 0:
+                                cost = qty * row['Price']
+                                st.session_state.cash_balance -= cost
+                                st.session_state.portfolio[row['Symbol']] = {
+                                    "qty": qty,
+                                    "avg_price": row['Price'],
+                                    "sl": row['Price'] * 0.95,
+                                    "target": row['Price'] * 1.15
+                                }
+                                st.session_state.trade_log.append({
+                                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "BUY",
+                                    "symbol": row['Symbol'],
+                                    "qty": qty,
+                                    "price": row['Price']
+                                })
+                                st.success(f"Bought {qty} shares of {row['Symbol']} at ₹{row['Price']:,.2f}")
+                                st.rerun()
 
-with tab_trades:
-    st.subheader("Executed Orders Log")
-    st.dataframe(results_df[results_df['Signal'] != 0][['Tick', 'Mid_Price', 'Bid', 'Ask', 'Z_Score', 'Signal', 'Strategy_Returns']], use_container_width=True)
+                    # Sell Execution Button
+                    elif row['Symbol'] in st.session_state.portfolio:
+                        if c3.button(f"Liquidate Position for {row['Symbol']}", key=f"sell_{row['Symbol']}"):
+                            pos = st.session_state.portfolio.pop(row['Symbol'])
+                            revenue = pos['qty'] * row['Price']
+                            st.session_state.cash_balance += revenue
+                            pnl = revenue - (pos['qty'] * pos['avg_price'])
+                            
+                            st.session_state.trade_log.append({
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "action": "SELL",
+                                "symbol": row['Symbol'],
+                                "qty": pos['qty'],
+                                "price": row['Price'],
+                                "pnl": pnl
+                            })
+                            st.warning(f"Sold {pos['qty']} shares of {row['Symbol']}. Realized PnL: ₹{pnl:,.2f}")
+                            st.rerun()
 
-with tab_orderbook:
-    st.subheader("Spread and Z-Score Distribution")
-    fig_z = go.Figure()
-    fig_z.add_trace(go.Scatter(x=results_df['Tick'], y=results_df['Z_Score'], mode='lines', name='Z-Score', line=dict(color='#f59e0b', width=1)))
-    fig_z.add_hline(y=z_threshold, line_dash="dash", line_color="#ff1744", annotation_text="Upper Entry Limit")
-    fig_z.add_hline(y=-z_threshold, line_dash="dash", line_color="#00e676", annotation_text="Lower Entry Limit")
-    fig_z.update_layout(template="plotly_dark", height=400, xaxis_title="Tick Counter", yaxis_title="Z-Score")
-    st.plotly_chart(fig_z, use_container_width=True)
+        with tab_holdings:
+            st.subheader("Current Virtual Positions")
+            if st.session_state.portfolio:
+                p_rows = []
+                for sym, pos in st.session_state.portfolio.items():
+                    sym_match = df[df['Symbol'] == sym]
+                    c_price = sym_match['Price'].iloc[0] if not sym_match.empty else pos['avg_price']
+                    val = pos['qty'] * c_price
+                    pnl = val - (pos['qty'] * pos['avg_price'])
+                    
+                    p_rows.append({
+                        "Symbol": sym,
+                        "Quantity": pos['qty'],
+                        "Avg Buy Price": f"₹{pos['avg_price']:,.2f}",
+                        "Current Price": f"₹{c_price:,.2f}",
+                        "Position Value": f"₹{val:,.2f}",
+                        "Unrealized PnL": f"₹{pnl:,.2f}"
+                    })
+                st.dataframe(pd.DataFrame(p_rows), use_container_width=True)
+            else:
+                st.info("No active positions in your paper portfolio.")
 
-with tab_export:
-    st.subheader("Engine Export Interface")
-    csv_out = results_df.to_csv(index=False).encode('utf-8')
-    st.download_button("📥 Export Execution Log (CSV)", data=csv_out, file_name=f"HFT_Execution_Log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        with tab_logs:
+            st.subheader("Order Audit History")
+            if st.session_state.trade_log:
+                st.dataframe(pd.DataFrame(st.session_state.trade_log), use_container_width=True)
+            else:
+                st.info("No trades executed yet.")

@@ -1,10 +1,11 @@
 import os
+import time
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 
-# Alpaca API imports
+# Alpaca API SDK
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import LimitOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
@@ -12,36 +13,37 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# 1. Environment & API Setup
+# 1. Environment Credentials
 load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY") or st.secrets.get("ALPACA_API_KEY", None)
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or st.secrets.get("ALPACA_SECRET_KEY", None)
 
 if not API_KEY or not SECRET_KEY:
-    st.error("⚠️ Alpaca credentials missing! Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env or Secrets.")
+    st.error("⚠️ Alpaca API Keys missing in .env or Streamlit Secrets!")
     st.stop()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-# High-Frequency UI Settings (Refreshes state every 3 seconds)
-st.set_page_config(page_title="High-Speed Scalper Engine", layout="wide")
-st.title("⚡ Ultra-Fast Intraday Scalper & Risk Guardian")
-st_autorefresh(interval=3000, key="high_speed_loop")
+# 2. Page Config & High-Frequency Auto Refresh (3 Seconds)
+st.set_page_config(page_title="High-Precision Scalper Engine", layout="wide")
+st.title("⚡ Institutional-Grade Intraday & Extended-Hours Scalper")
+st_autorefresh(interval=3000, key="scalper_loop")
 
-if "trade_audit_trail" not in st.session_state:
-    st.session_state.trade_audit_trail = []
+# Session State Initialization to Maintain Execution Memory Across Reruns
+if "trade_audit" not in st.session_state:
+    st.session_state.trade_audit = []
 
-# 2. High-Frequency Technical Indicator Math
-def Get_High_Speed_Metrics(symbol: str):
+# 3. High-Precision Indicator Math
+def Get_Market_Metrics(symbol: str):
     """
-    Computes 1-minute indicators: Fast EMA (3), Slow EMA (12), Fast RSI (9), and VWAP.
+    Retrieves 1-minute historical data and calculates EMA trend strength, Fast RSI, and VWAP.
     """
     try:
         req = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame.Minute,
-            limit=25
+            limit=30
         )
         bars = data_client.get_stock_bars(req)
         df = bars.df
@@ -53,18 +55,17 @@ def Get_High_Speed_Metrics(symbol: str):
         highs = df['high']
         lows = df['low']
 
-        # Ultra-fast moving averages for rapid trend Detection
-        ema_fast = closes.ewm(span=3, adjust=False).mean().iloc[-1]
-        ema_slow = closes.ewm(span=12, adjust=False).mean().iloc[-1]
+        ema_fast = closes.ewm(span=5, adjust=False).mean().iloc[-1]
+        ema_slow = closes.ewm(span=20, adjust=False).mean().iloc[-1]
 
-        # Fast RSI (9-period for immediate overbought/oversold detection)
+        # Fast RSI (7 Period)
         delta = closes.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=9).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=9).mean()
+        gain = (delta.where(delta > 0, 0)).rolling(window=7).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=7).mean()
         rs = gain / loss
         rsi = (100 - (100 / (1 + rs))).iloc[-1]
 
-        # VWAP
+        # Volume Weighted Average Price (VWAP)
         typical_price = (highs + lows + closes) / 3
         vwap = (typical_price * volumes).sum() / volumes.sum()
 
@@ -80,188 +81,171 @@ def Get_High_Speed_Metrics(symbol: str):
     except Exception:
         return None
 
-# 3. Aggressive Execution Engine
-def Execute_Fast_Limit_Order(symbol: str, side: OrderSide, base_price: float, qty: int, reason: str, active_positions: dict):
+# 4. Ultra-Fast Execution Router
+def Execute_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: str):
     """
-    Executes Limit Orders with a price-buffer offset to guarantee immediate fill execution
-    during extended-hours sessions.
+    Places Market-Aggressive Extended Hours Limit Orders for immediate execution fills.
     """
     try:
-        current_holding = active_positions.get(symbol, {"qty": 0, "avg_entry": 0.0})
-        current_qty = current_holding["qty"]
+        # Cross spread for instant fill: Buy @ Ask (+0.1%), Sell @ Bid (-0.1%)
+        limit_price = round(price * 1.001, 2) if side == OrderSide.BUY else round(price * 0.999, 2)
 
-        # SHORT-SALE SAFETY GUARD
-        if side == OrderSide.SELL and current_qty <= 0:
-            return False
-
-        account = trading_client.get_account()
-        buying_power = float(account.buying_power)
-
-        # Buffer pricing: Buy slightly above market, Sell slightly below market for instant fills
-        if side == OrderSide.BUY:
-            fill_price = round(base_price * 1.0008, 2)
-            if (fill_price * qty) > buying_power:
-                st.error(f"⛔ Trade Rejected: Insufficient buying power for {symbol}")
-                return False
-        else:
-            fill_price = round(base_price * 0.9992, 2)
-
-        order_request = LimitOrderRequest(
+        order_req = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=side,
-            limit_price=fill_price,
+            limit_price=limit_price,
             time_in_force=TimeInForce.DAY,
             extended_hours=True
         )
 
-        trading_client.submit_order(order_request)
+        trading_client.submit_order(order_req)
 
-        st.session_state.trade_audit_trail.insert(0, {
+        # Audit Trail Logging
+        st.session_state.trade_audit.insert(0, {
             "Time": pd.Timestamp.now().strftime("%H:%M:%S"),
             "Symbol": symbol,
             "Action": side.value.upper(),
             "Qty": qty,
-            "Price": f"${fill_price:.2f}",
-            "Trigger": reason
+            "Fill Limit": f"${limit_price:.2f}",
+            "Reason": reason
         })
-        st.toast(f"⚡ ORDER FILLED: {side.value.upper()} {qty} shares of {symbol} @ ${fill_price:.2f}")
+        st.toast(f"⚡ EXECUTED {side.value.upper()} {qty} shares of {symbol} @ ${limit_price:.2f}")
         return True
-
     except Exception as e:
         st.error(f"Execution Error ({symbol}): {str(e)}")
         return False
 
-# 4. Streamlit Control Panel & Real-time Loop
-st.sidebar.header("⚙️ Scalper Parameters")
-bot_active = st.sidebar.toggle("🟢 Activate Auto-Scalper Bot", value=False)
-shares_per_trade = st.sidebar.number_input("Shares Per Order", min_value=1, max_value=200, value=5)
+# 5. Dashboard Sidebar Controls
+st.sidebar.header("🕹️ Quantitative Controls")
+bot_active = st.sidebar.toggle("🟢 Activate Auto-Trading Engine", value=False)
+shares_per_trade = st.sidebar.number_input("Shares Per Trade", min_value=1, max_value=100, value=5)
 
-# Hard Risk Parameters
-stop_loss_pct = 0.008   # Cut loss at -0.8%
-take_profit_pct = 0.012 # Lock profit at +1.2%
+# Scalping Parameters
+STOP_LOSS_PCT = 0.005    # Tight 0.5% Stop Loss
+TAKE_PROFIT_PCT = 0.010  # 1.0% Profit Target
 
-watch_universe = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "AMZN"]
+watchlist = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "AMZN"]
 
-# Retrieve Current Open Positions
-raw_positions = trading_client.get_all_positions()
-active_positions = {p.symbol: {"qty": int(p.qty), "avg_entry": float(p.avg_entry_price)} for p in raw_positions}
+# Retrieve Live Positions & Open Orders State
+positions = trading_client.get_all_positions()
+active_positions = {p.symbol: {"qty": int(p.qty), "avg_entry": float(p.avg_entry_price), "unrealized_pnl": float(p.unrealized_pl)} for p in positions}
 
-# Emergency Flash Liquidator
+open_orders = trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
+pending_buy_symbols = [o.symbol for o in open_orders if o.side == OrderSide.BUY]
+
+# Emergency Controls
 st.sidebar.markdown("---")
-if st.sidebar.button("🚨 EMERGENCY: CLOSE ALL POSITIONS"):
+if st.sidebar.button("🚨 EMERGENCY: CANCEL ALL & LIQUIDATE"):
     trading_client.cancel_orders()
     for sym, pos in active_positions.items():
         if pos["qty"] > 0:
             trading_client.close_position(sym)
-    st.sidebar.error("All active orders canceled and positions closed!")
+    st.sidebar.success("All pending orders cancelled and positions closed.")
 
-tab_scanner, tab_portfolio, tab_audit = st.tabs(["⚡ Fast Signal Matrix", "💼 Live Holdings & Risk", "📜 Execution Audit"])
+# UI Tabs
+tab_signals, tab_positions, tab_audit = st.tabs(["⚡ Live Signal Matrix", "💼 Active Positions & Risk", "📜 Execution Audit Trail"])
 
-with tab_scanner:
-    st.subheader("Real-Time Signal Engine")
+with tab_signals:
+    st.subheader("Real-Time Multi-Stock Signal Stream")
     matrix = []
 
-    for symbol in watch_universe:
-        m = Get_High_Speed_Metrics(symbol)
-        if m:
-            price = m["price"]
-            ema_f = m["ema_fast"]
-            ema_s = m["ema_slow"]
-            rsi = m["rsi"]
-            vwap = m["vwap"]
+    for symbol in watchlist:
+        metrics = Get_Market_Metrics(symbol)
+        if metrics:
+            price = metrics["price"]
+            ema_f = metrics["ema_fast"]
+            ema_s = metrics["ema_slow"]
+            rsi = metrics["rsi"]
+            vwap = metrics["vwap"]
 
-            holding_data = active_positions.get(symbol, {"qty": 0, "avg_entry": 0.0})
+            holding_data = active_positions.get(symbol, {"qty": 0, "avg_entry": 0.0, "unrealized_pnl": 0.0})
             holding_qty = holding_data["qty"]
             avg_entry = holding_data["avg_entry"]
 
-            # --- HARD PROFIT & LOSS PROTECTION MATH ---
-            is_stop_loss = False
-            is_take_profit = False
+            # Calculate Exact PnL Percentage
             pnl_pct = 0.0
-
             if holding_qty > 0 and avg_entry > 0:
                 pnl_pct = (price - avg_entry) / avg_entry
-                if pnl_pct <= -stop_loss_pct:
-                    is_stop_loss = True
-                elif pnl_pct >= take_profit_pct:
-                    is_take_profit = True
 
-            # QUANT BUY CONDITION: Fast EMA > Slow EMA AND Price > VWAP AND RSI < 60
-            buy_signal = (ema_f > ema_s) and (price >= vwap) and (rsi < 60) and (holding_qty == 0)
+            # --- DYNAMIC PROFIT/LOSS & ENTRY/EXIT MATH ---
+            is_stop_loss = (holding_qty > 0) and (pnl_pct <= -STOP_LOSS_PCT)
+            is_take_profit = (holding_qty > 0) and (pnl_pct >= TAKE_PROFIT_PCT)
 
-            # QUANT SELL CONDITION: Trend Break (EMA Fast < Slow) OR Overbought (RSI > 68)
-            sell_signal = (ema_f < ema_s) or (rsi > 68)
+            # ENTRY MATH: Fast EMA > Slow EMA AND Price >= VWAP AND RSI oversold/neutral (< 55)
+            # GUARD: Must hold 0 shares AND have NO pending buy order in flight
+            buy_signal = (ema_f > ema_s) and (price >= vwap) and (rsi < 55) and (holding_qty == 0) and (symbol not in pending_buy_symbols)
+
+            # EXIT MATH: Fast EMA breaks below Slow EMA OR RSI overbought (> 65)
+            sell_signal = ((ema_f < ema_s) or (rsi > 65)) and (holding_qty > 0)
 
             status = "NEUTRAL"
             if is_stop_loss:
-                status = "🛑 HARD STOP-LOSS TRIGGER"
+                status = "🛑 STOP LOSS TRIGGER"
             elif is_take_profit:
-                status = "🎯 TAKE-PROFIT TRIGGER"
+                status = "🎯 TAKE PROFIT TRIGGER"
             elif buy_signal:
-                status = "🟢 BUY MOMENTUM"
-            elif sell_signal and holding_qty > 0:
+                status = "🟢 STRONG BUY"
+            elif sell_signal:
                 status = "🔴 EXIT SIGNAL"
 
             matrix.append({
                 "Symbol": symbol,
                 "Price": f"${price:.2f}",
-                "EMA(3)": f"${ema_f:.2f}",
-                "EMA(12)": f"${ema_s:.2f}",
-                "RSI(9)": f"{rsi:.1f}",
-                "Unrealized PnL": f"{pnl_pct*100:+.2f}%" if holding_qty > 0 else "N/A",
+                "EMA(5)": f"${ema_f:.2f}",
+                "EMA(20)": f"${ema_s:.2f}",
+                "RSI(7)": f"{rsi:.1f}",
+                "Position PnL": f"{pnl_pct*100:+.2f}%" if holding_qty > 0 else "0.00%",
                 "Holdings": holding_qty,
                 "Status": status
             })
 
-            # AUTOMATED SCALPER EXECUTION
+            # AUTOMATED SCALPER EXECUTION ENGINE
             if bot_active:
-                # 1. STOP-LOSS SAFETY EXIT
+                # 1. FORCE EXIT ON STOP LOSS
                 if is_stop_loss:
-                    Execute_Fast_Limit_Order(symbol, OrderSide.SELL, price, holding_qty, f"STOP LOSS HIT ({pnl_pct*100:.2f}%)", active_positions)
-                
-                # 2. TAKE-PROFIT EXIT
+                    Execute_Order(symbol, OrderSide.SELL, price, holding_qty, f"HARD STOP LOSS HIT ({pnl_pct*100:.2f}%)")
+
+                # 2. FORCE EXIT ON TAKE PROFIT
                 elif is_take_profit:
-                    Execute_Fast_Limit_Order(symbol, OrderSide.SELL, price, holding_qty, f"TAKE PROFIT TARGET REACHED (+{pnl_pct*100:.2f}%)", active_positions)
-                
-                # 3. MOMENTUM ENTRY
+                    Execute_Order(symbol, OrderSide.SELL, price, holding_qty, f"TAKE PROFIT TARGET REACHED (+{pnl_pct*100:.2f}%)")
+
+                # 3. ENTER MOMENTUM BUY
                 elif buy_signal:
-                    Execute_Fast_Limit_Order(symbol, OrderSide.BUY, price, shares_per_trade, f"Fast EMA Crossover & VWAP Support", active_positions)
-                
-                # 4. TREND BREAKOUT EXIT
-                elif sell_signal and holding_qty > 0:
-                    Execute_Fast_Limit_Order(symbol, OrderSide.SELL, price, holding_qty, f"Fast EMA Trend Breakdown", active_positions)
+                    Execute_Order(symbol, OrderSide.BUY, price, shares_per_trade, f"Fast EMA Breakout & VWAP Support")
+
+                # 4. EXIT ON TREND REVERSAL
+                elif sell_signal:
+                    Execute_Order(symbol, OrderSide.SELL, price, holding_qty, f"Trend Reversal / RSI Exit Trigger")
 
     st.table(pd.DataFrame(matrix))
 
-with tab_portfolio:
-    st.subheader("Account Capital & Risk Exposure")
+with tab_positions:
+    st.subheader("Live Portfolio Holdings & Account Equity")
     acc = trading_client.get_account()
-    
+
     col1, col2, col3 = st.columns(3)
     col1.metric("Equity", f"${float(acc.equity):,.2f}")
     col2.metric("Buying Power", f"${float(acc.buying_power):,.2f}")
     col3.metric("Daytrade Count", acc.daytrade_count)
 
     st.markdown("---")
-    st.subheader("Active Position P&L Breakdown")
-    if raw_positions:
+    if positions:
         pos_df = pd.DataFrame([{
             "Symbol": p.symbol,
             "Qty": p.qty,
             "Avg Entry": f"${float(p.avg_entry_price):.2f}",
             "Current Price": f"${float(p.current_price):.2f}",
-            "Market Value": f"${float(p.market_value):,.2f}",
-            "Unrealized P/L": f"${float(p.unrealized_pl):,.2f}",
-            "PnL %": f"{float(p.unrealized_plpc)*100:+.2f}%"
-        } for p in raw_positions])
+            "Unrealized P/L ($)": f"${float(p.unrealized_pl):,.2f}",
+            "Unrealized P/L (%)": f"{float(p.unrealized_plpc)*100:+.2f}%"
+        } for p in positions])
         st.dataframe(pos_df, use_container_width=True)
     else:
-        st.info("No active open positions.")
+        st.info("No open positions currently in portfolio.")
 
 with tab_audit:
-    st.subheader("Live Execution Audit Log")
-    if st.session_state.trade_audit_trail:
-        st.dataframe(pd.DataFrame(st.session_state.trade_audit_trail), use_container_width=True)
+    st.subheader("Real-Time Execution Audit Trail")
+    if st.session_state.trade_audit:
+        st.dataframe(pd.DataFrame(st.session_state.trade_audit), use_container_width=True)
     else:
-        st.info("No trades executed yet in this session.")
+        st.info("No trades executed in current session.")

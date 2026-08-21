@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 from streamlit_autorefresh import st_autorefresh
 
@@ -12,167 +13,220 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# 1. Environment & API Initialization
+# 1. Environment & API Secrets Setup
 load_dotenv()
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+
+# Streamlit Cloud uses st.secrets; local runs use .env
+API_KEY = os.getenv("ALPACA_API_KEY") or st.secrets.get("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or st.secrets.get("ALPACA_SECRET_KEY")
 
 if not API_KEY or not SECRET_KEY:
-    st.error("Missing Alpaca API Credentials in .env file.")
+    st.error("⚠️ Credentials missing! Set ALPACA_API_KEY and ALPACA_SECRET_KEY in Streamlit Secrets or .env file.")
     st.stop()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-# Streamlit Page Setup
-st.set_page_config(page_title="Alpaca Extended Hours Trader", layout="wide")
-st.title("⚡ Extended-Hours Trading & Signal Manager")
+# Page Configuration & Auto-Refresh (High-Frequency 5-second polling)
+st.set_page_config(page_title="Institutional Extended-Hours Execution Engine", layout="wide")
+st.title("⚡ High-Speed Extended-Hours Execution Engine")
+st_autorefresh(interval=5000, key="quant_engine_refresh")
 
-# Auto-refresh UI every 15 seconds
-st_autorefresh(interval=15000, key="datarefresh")
+# Initialize Session Logs for Trade Auditing
+if "trade_logs" not in st.session_state:
+    st.session_state.trade_logs = []
 
-# 2. Risk Management Helper Functions
-def validate_and_place_order(symbol: str, side: OrderSide, limit_price: float, qty: int, is_ext_hours: bool):
-    """Guards against sizing, spread, and TIF constraints before submitting order."""
+# 2. Institutional Quant & Math Calculations
+def Calculate_Quant_Metrics(symbol: str):
+    """
+    Computes 14-period RSI, 20-period EMA, and VWAP on 1-minute historical data.
+    Returns real-time price, metrics, and quantitative bias.
+    """
+    try:
+        request_params = StockBarsRequest(
+            symbol_or_symbols=symbol,
+            timeframe=TimeFrame.Minute,
+            limit=60
+        )
+        bars = data_client.get_stock_bars(request_params)
+        df = bars.df
+        
+        if df.empty or len(df) < 20:
+            return None
+
+        # Extract closing prices and volume
+        closes = df['close']
+        volumes = df['volume']
+        highs = df['high']
+        lows = df['low']
+
+        # A. Exponential Moving Average (EMA 20)
+        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+
+        # B. Volume Weighted Average Price (VWAP)
+        typical_price = (highs + lows + closes) / 3
+        vwap = (typical_price * volumes).sum() / volumes.sum()
+
+        # C. Relative Strength Index (RSI 14)
+        delta = closes.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        latest_price = closes.iloc[-1]
+        latest_rsi = rsi.iloc[-1]
+
+        return {
+            "price": latest_price,
+            "rsi": latest_rsi,
+            "ema20": ema20,
+            "vwap": vwap
+        }
+    except Exception as e:
+        st.error(f"Data Fetch Error ({symbol}): {str(e)}")
+        return None
+
+# 3. High-Speed Smart Order Execution System
+def Execute_Smart_Trade(symbol: str, side: OrderSide, target_price: float, qty: int, reason: str):
+    """
+    Validates account equity, applies max sizing risk limits, and submits extended-hours Limit Orders.
+    """
     try:
         account = trading_client.get_account()
         equity = float(account.equity)
         buying_power = float(account.buying_power)
         
-        # Guard 1: Position Size Limit (Max 10% of total account equity per order)
-        order_val = limit_price * qty
-        if order_val > (equity * 0.10):
-            st.error(f"❌ Risk Guard: Order value (${order_val:,.2f}) exceeds 10% max equity limit.")
-            return False
-            
-        # Guard 2: Available Buying Power Check
-        if order_val > buying_power:
-            st.error(f"❌ Risk Guard: Insufficient buying power (${buying_power:,.2f}).")
+        order_value = target_price * qty
+        
+        # Risk Rule 1: Sizing Guard - Max 5% equity allocation per order
+        if order_value > (equity * 0.05):
+            st.warning(f"⛔ Trade Rejected for {symbol}: Value (${order_value:,.2f}) exceeds 5% max equity guard.")
             return False
 
-        # Guard 3: Extended-Hours Rule Enforcement
-        # Extended hours requires TimeInForce.DAY and Limit Order
-        tif = TimeInForce.DAY if is_ext_hours else TimeInForce.GTC
-        
-        req = LimitOrderRequest(
+        # Risk Rule 2: Buying Power Guard
+        if order_value > buying_power:
+            st.error(f"⛔ Trade Rejected for {symbol}: Insufficient buying power.")
+            return False
+
+        # Enforce Extended Hours Requirements: Limit Order + TimeInForce.DAY
+        limit_order_req = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=side,
-            limit_price=round(limit_price, 2),
-            time_in_force=tif,
-            extended_hours=is_ext_hours
+            limit_price=round(target_price, 2),
+            time_in_force=TimeInForce.DAY,
+            extended_hours=True
         )
+
+        submitted_order = trading_client.submit_order(limit_order_req)
         
-        order = trading_client.submit_order(req)
-        st.success(f"✅ Order Submitted: {side.value.upper()} {qty} shares of {symbol} @ ${limit_price:.2f}")
+        # Log decision for trader audit review
+        log_entry = {
+            "Time": pd.Timestamp.now().strftime("%H:%M:%S"),
+            "Symbol": symbol,
+            "Action": side.value.upper(),
+            "Qty": qty,
+            "Price": f"${target_price:.2f}",
+            "Reason": reason
+        }
+        st.session_state.trade_logs.insert(0, log_entry)
+        st.success(f"⚡ ORDER EXECUTED: {side.value.upper()} {qty} shares of {symbol} @ ${target_price:.2f}")
         return True
 
     except Exception as e:
-        st.error(f"❌ Execution Error: {str(e)}")
+        st.error(f"❌ Execution Failure: {str(e)}")
         return False
 
-# 3. Technical Indicator: RSI Calculation
-def calculate_rsi(symbol: str, period: int = 14):
-    request_params = StockBarsRequest(
-        symbol_or_symbols=symbol,
-        timeframe=TimeFrame.Minute,
-        limit=50
-    )
-    bars = data_client.get_stock_bars(request_params)
-    df = bars.df
-    if df.empty:
-        return None, None
+# 4. Streamlit User Interface
+st.sidebar.header("🕹️ Strategy Parameters")
+auto_mode = st.sidebar.toggle("Activate Automated Signal Bot", value=False)
+order_share_qty = st.sidebar.number_input("Shares per Executed Trade", min_value=1, max_value=100, value=5)
+
+watch_list = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT"]
+
+tab_scanner, tab_portfolio, tab_audit = st.tabs(["🎯 Live Signal Scanner", "💼 Positions & Account", "📜 Trade Execution Logs"])
+
+with tab_scanner:
+    st.subheader("Quantitative Signal Matrix")
     
-    # Calculate price change
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
+    scanner_data = []
     
-    latest_price = df['close'].iloc[-1]
-    latest_rsi = df['rsi'].iloc[-1]
-    return latest_price, latest_rsi
-
-# 4. Streamlit UI Components
-
-# Sidebar Controls
-st.sidebar.header("Execution Settings")
-ext_hours_enabled = st.sidebar.toggle("Extended Hours Mode (Pre/Post Market)", value=True)
-auto_trade = st.sidebar.toggle("Automated RSI Execution", value=False)
-max_shares = st.sidebar.number_input("Shares per Auto Trade", min_value=1, max_value=500, value=10)
-
-# Main Dashboard Layout
-tab1, tab2, tab3 = st.tabs(["📊 Quant Scanner & Auto Bot", "💼 Positions & Portfolio", "📜 Active Orders"])
-
-with tab1:
-    st.subheader("RSI Scanner & Strategy Execution")
-    watch_symbols = ["AAPL", "TSLA", "NVDA", "AMD"]
-    
-    col1, col2 = st.columns(2)
-    
-    for symbol in watch_symbols:
-        price, rsi = calculate_rsi(symbol)
-        if price is not None:
-            st.write(f"**{symbol}** | Price: `${price:.2f}` | RSI: `{rsi:.2f}`")
+    for symbol in watch_list:
+        metrics = Calculate_Quant_Metrics(symbol)
+        
+        if metrics:
+            price = metrics["price"]
+            rsi = metrics["rsi"]
+            ema = metrics["ema20"]
+            vwap = metrics["vwap"]
             
-            # Automated Execution Checks
-            if auto_trade:
-                # Oversold Buy Signal
-                if rsi <= 30:
-                    st.warning(f"🚨 OVERSOLD SIGNAL DETECTED FOR {symbol}")
-                    # Buy slightly above ask to improve fill chance during low liquidity
-                    buy_price = price * 1.002
-                    validate_and_place_order(symbol, OrderSide.BUY, buy_price, max_shares, ext_hours_enabled)
-                
-                # Overbought Sell Signal
-                elif rsi >= 70:
-                    st.warning(f"🚨 OVERBOUGHT SIGNAL DETECTED FOR {symbol}")
-                    sell_price = price * 0.998
-                    validate_and_place_order(symbol, OrderSide.SELL, sell_price, max_shares, ext_hours_enabled)
+            # --- PROFIT-FOCUSED TRADING MATHEMATICS ---
+            # BUY LOGIC: RSI < 32 (Oversold) AND Price > VWAP (Institutional Upward Bias)
+            buy_condition = (rsi <= 32) and (price >= vwap)
+            
+            # SELL LOGIC: RSI > 68 (Overbought) OR Price below EMA (Trend Breakdown Guard)
+            sell_condition = (rsi >= 68) or (price < (ema * 0.995))
+            
+            status = "NEUTRAL"
+            if buy_condition:
+                status = "🟢 STRONG BUY"
+            elif sell_condition:
+                status = "🔴 STRONG SELL"
 
-with tab2:
-    st.subheader("Live Portfolio & Positions")
-    account = trading_client.get_account()
-    st.metric("Portfolio Equity", f"${float(account.equity):,.2f}", f"${float(account.buying_power):,.2f} Buying Power")
+            scanner_data.append({
+                "Symbol": symbol,
+                "Price": f"${price:.2f}",
+                "RSI (14)": f"{rsi:.1f}",
+                "EMA 20": f"${ema:.2f}",
+                "VWAP": f"${vwap:.2f}",
+                "Signal": status
+            })
+
+            # Auto-Trading Execution Loop
+            if auto_mode:
+                if buy_condition:
+                    # Apply 0.1% buffer over market price to ensure fill speed on illiquid books
+                    execution_price = price * 1.001
+                    reason = f"Quant Trigger: Oversold RSI ({rsi:.1f}) + Bullish VWAP (${vwap:.2f})"
+                    Execute_Smart_Trade(symbol, OrderSide.BUY, execution_price, order_share_qty, reason)
+                    
+                elif sell_condition:
+                    execution_price = price * 0.999
+                    reason = f"Quant Trigger: Overbought RSI ({rsi:.1f}) or Trend Guard breakdown"
+                    Execute_Smart_Trade(symbol, OrderSide.SELL, execution_price, order_share_qty, reason)
+
+    st.table(pd.DataFrame(scanner_data))
+
+with tab_portfolio:
+    st.subheader("Account Portfolio Status")
+    acc = trading_client.get_account()
     
-    positions = trading_client.get_all_positions()
-    if positions:
-        pos_data = [{
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Account Equity", f"${float(acc.equity):,.2f}")
+    col2.metric("Buying Power", f"${float(acc.buying_power):,.2f}")
+    col3.metric("Cash Balance", f"${float(acc.cash):,.2f}")
+    
+    st.markdown("---")
+    st.subheader("Active Positions")
+    active_positions = trading_client.get_all_positions()
+    if active_positions:
+        p_df = pd.DataFrame([{
             "Symbol": p.symbol,
             "Qty": p.qty,
             "Avg Entry": f"${float(p.avg_entry_price):.2f}",
             "Current Price": f"${float(p.current_price):.2f}",
-            "Unrealized P/L": f"${float(p.unrealized_pl):.2f}"
-        } for p in positions]
-        st.dataframe(pd.DataFrame(pos_data), use_container_width=True)
-        
-        # Liquidate single position trigger
-        liquidate_sym = st.selectbox("Select symbol to close:", [p.symbol for p in positions])
-        if st.button("Close Selected Position"):
-            trading_client.close_position(liquidate_sym)
-            st.success(f"Position for {liquidate_sym} closed.")
+            "Unrealized P/L": f"${float(p.unrealized_pl):,.2f}"
+        } for p in active_positions])
+        st.dataframe(p_df, use_container_width=True)
     else:
-        st.info("No open positions.")
+        st.info("No open positions in portfolio.")
 
-with tab3:
-    st.subheader("Order Book")
-    if st.button("🚨 Cancel All Open Orders"):
-        trading_client.cancel_orders()
-        st.warning("All active orders cancelled.")
-        
-    orders = trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
-    if orders:
-        order_data = [{
-            "ID": o.id,
-            "Symbol": o.symbol,
-            "Side": o.side,
-            "Type": o.type,
-            "Limit Price": o.limit_price,
-            "Ext Hours": o.extended_hours,
-            "Status": o.status
-        } for o in orders]
-        st.dataframe(pd.DataFrame(order_data), use_container_width=True)
+with tab_audit:
+    st.subheader("Real-Time Execution Audit Trail")
+    st.caption("Displays exact quantitative reasons why every trade was executed.")
+    if st.session_state.trade_logs:
+        st.dataframe(pd.DataFrame(st.session_state.trade_logs), use_container_width=True)
     else:
-        st.info("No open orders.")
+        st.info("No trades executed in current session.")

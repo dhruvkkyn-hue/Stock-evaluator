@@ -1,145 +1,52 @@
+import asyncio
 import os
+import sys
 import pandas as pd
 import numpy as np
-import streamlit as st
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor
-from streamlit_autorefresh import st_autorefresh
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.live import StockDataStream
 
 # -------------------------------------------------------------------
-# 1. SETUP & INITIALIZATION
+# 1. SETUP & CREDENTIALS
 # -------------------------------------------------------------------
 load_dotenv()
-API_KEY = os.getenv("ALPACA_API_KEY") or st.secrets.get("ALPACA_API_KEY", None)
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or st.secrets.get("ALPACA_SECRET_KEY", None)
+API_KEY = os.getenv("ALPACA_API_KEY")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
 if not API_KEY or not SECRET_KEY:
-    st.error("⚠️ Credentials missing! Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env or Streamlit Secrets.")
-    st.stop()
+    print("❌ Error: ALPACA_API_KEY or ALPACA_SECRET_KEY missing from environment.")
+    sys.exit(1)
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
-data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
+stream_client = StockDataStream(API_KEY, SECRET_KEY)
 
-st.set_page_config(page_title="High-Frequency Control Terminal", layout="wide")
-st.title("⚡ Low-Latency Quant Engine & Manual Control Terminal")
-
-# Rerun every 2 seconds for high-frequency updates
-st_autorefresh(interval=2000, key="quant_terminal_refresh")
-
-if "audit_log" not in st.session_state:
-    st.session_state.audit_log = []
-
-TICKER_UNIVERSE = [
-    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
-    "NFLX", "INTC", "PYPL", "BAC", "JPM", "DIS", "XOM", "COP", "PFE"
-]
-
+TICKERS = ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "AMZN"]
 MAX_CAPITAL_PER_TRADE = 100.0
-SLIPPAGE_PENALTY_PCT = 0.0005
+SLIPPAGE_PENALTY = 0.0005  # 0.05% slippage buffer
+
+# In-Memory State Engine
+market_data_cache = {ticker: [] for ticker in TICKERS}
+active_positions = {}
+pending_orders = set()
+bot_enabled = True
 
 # -------------------------------------------------------------------
-# 2. FAST PORTFOLIO & ORDER STATE SYNC
+# 2. LOW-LATENCY ORDER ROUTER
 # -------------------------------------------------------------------
-def Get_Live_Portfolio():
+async def execute_order_async(symbol: str, side: OrderSide, current_price: float, qty: int, reason: str):
+    """Submits limit orders asynchronously with zero UI overhead."""
+    if symbol in pending_orders:
+        return
+    
+    pending_orders.add(symbol)
     try:
-        account = trading_client.get_account()
-        positions_raw = trading_client.get_all_positions()
-        pos_map = {
-            p.symbol: {
-                "qty": int(p.qty),
-                "avg_entry": float(p.avg_entry_price),
-                "price": float(p.current_price),
-                "market_val": float(p.market_value),
-                "unrealized_pl": float(p.unrealized_pl),
-                "pnl_pct": float(p.unrealized_plpc)
-            } for p in positions_raw
-        }
-        return account, pos_map, positions_raw
-    except Exception as e:
-        st.error(f"Portfolio Sync Error: {e}")
-        return None, {}, []
-
-# -------------------------------------------------------------------
-# 3. ADVANCED ALPHA SIGNAL ENGINE (VWAP + ADX + ATR EDGE)
-# -------------------------------------------------------------------
-def Compute_Statistical_Edge(symbol: str):
-    try:
-        request = StockBarsRequest(
-            symbol_or_symbols=symbol,
-            timeframe=TimeFrame.Minute,
-            limit=35
-        )
-        bars = data_client.get_stock_bars(request)
-        df = bars.df
-        if df.empty or len(df) < 25:
-            return None
-
-        # VWAP
-        df['tp'] = (df['high'] + df['low'] + df['close']) / 3
-        df['pv'] = df['tp'] * df['volume']
-        vwap = df['pv'].sum() / df['volume'].sum() if df['volume'].sum() > 0 else df['close'].iloc[-1]
+        limit_price = round(current_price * (1 + SLIPPAGE_PENALTY), 2) if side == OrderSide.BUY else round(current_price * (1 - SLIPPAGE_PENALTY), 2)
         
-        latest_price = df['close'].iloc[-1]
-        ema_fast = df['close'].ewm(span=5, adjust=False).mean().iloc[-1]
-        ema_slow = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-
-        # True Range & ATR
-        tr = pd.concat([
-            df['high'] - df['low'],
-            (df['high'] - df['close'].shift()).abs(),
-            (df['low'] - df['close'].shift()).abs()
-        ], axis=1).max(axis=1)
-        atr = tr.rolling(14).mean().iloc[-1]
-
-        # Directional Movement for Trend Strength (ADX Proxy)
-        up_move = df['high'].diff()
-        down_move = -df['low'].diff()
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        tr_smooth = tr.rolling(14).sum().iloc[-1]
-        plus_di = 100 * (pd.Series(plus_dm).rolling(14).sum().iloc[-1] / tr_smooth) if tr_smooth > 0 else 0
-        minus_di = 100 * (pd.Series(minus_dm).rolling(14).sum().iloc[-1] / tr_smooth) if tr_smooth > 0 else 0
-        
-        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-6)) * 100
-
-        return {
-            "Symbol": symbol,
-            "Price": latest_price,
-            "VWAP": vwap,
-            "EMA_Fast": ema_fast,
-            "EMA_Slow": ema_slow,
-            "ATR": atr,
-            "Trend_Strength": dx,
-            "Bullish_Bias": plus_di > minus_di
-        }
-    except Exception:
-        return None
-
-def Parallel_Universe_Scan(universe):
-    results = {}
-    with ThreadPoolExecutor(max_workers=min(len(universe), 12)) as executor:
-        out = executor.map(Compute_Statistical_Edge, universe)
-        for res in out:
-            if res:
-                results[res["Symbol"]] = res
-    return results
-
-# -------------------------------------------------------------------
-# 4. ORDER ROUTER & MANUAL EXECUTION CONTROLLER
-# -------------------------------------------------------------------
-def Send_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: str):
-    try:
-        limit_price = round(price * (1 + SLIPPAGE_PENALTY_PCT), 2) if side == OrderSide.BUY else round(price * (1 - SLIPPAGE_PENALTY_PCT), 2)
-        
-        order_req = LimitOrderRequest(
+        req = LimitOrderRequest(
             symbol=symbol,
             qty=qty,
             side=side,
@@ -147,180 +54,155 @@ def Send_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: str
             time_in_force=TimeInForce.DAY,
             extended_hours=True
         )
-        trading_client.submit_order(order_req)
         
-        st.session_state.audit_log.insert(0, {
-            "Time": pd.Timestamp.now().strftime("%H:%M:%S"),
-            "Symbol": symbol,
-            "Side": side.value.upper(),
-            "Qty": qty,
-            "Limit Price": f"${limit_price:.2f}",
-            "Type": "AUTOBOT" if "Manual" not in reason else "MANUAL",
-            "Reason": reason
-        })
-        st.toast(f"⚡ ORDER EXECUTED: {side.value.upper()} {qty} {symbol} @ ${limit_price:.2f}")
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, trading_client.submit_order, req)
+        print(f"\n⚡ [ORDER FILLED] {side.value.upper()} {qty} shares of {symbol} @ ${limit_price:.2f} | Reason: {reason}")
     except Exception as e:
-        st.error(f"Execution Error ({symbol}): {str(e)}")
+        print(f"\n❌ [EXECUTION FAILED] {symbol}: {e}")
+    finally:
+        pending_orders.remove(symbol)
 
 # -------------------------------------------------------------------
-# 5. DASHBOARD LAYOUT & CONTROLS
+# 3. HIGH-ACCURACY QUANT SIGNAL ENGINE
 # -------------------------------------------------------------------
-account, active_pos_map, raw_positions = Get_Live_Portfolio()
+def evaluate_market_edge(symbol: str):
+    """Calculates multi-factor VWAP + Volume Spike + Momentum Alpha Edge."""
+    ticks = market_data_cache[symbol]
+    if len(ticks) < 15:
+        return None, 0.0
 
-# Sidebar Control Station
-st.sidebar.header("🕹️ Execution Controls")
-bot_active = st.sidebar.toggle("🟢 Activate Autonomous Trading Engine", value=False)
-
-if account:
-    st.sidebar.metric("Portfolio Equity", f"${float(account.equity):,.2f}")
-    st.sidebar.metric("Buying Power", f"${float(account.buying_power):,.2f}")
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🚨 Emergency Overrides")
-
-if st.sidebar.button("💥 CANCEL ALL PENDING ORDERS"):
-    trading_client.cancel_orders()
-    st.sidebar.success("All pending orders canceled.")
-
-if st.sidebar.button("🔥 PANIC LIQUIDATE ENTIRE PORTFOLIO"):
-    trading_client.cancel_orders()
-    for sym, pos in active_pos_map.items():
-        if pos["qty"] > 0:
-            trading_client.close_position(sym)
-    st.sidebar.warning("Liquidated all active positions.")
-
-# Tabs
-tab_terminal, tab_manual, tab_signals, tab_audit = st.tabs([
-    "💼 Portfolio & Direct Controls", 
-    "🎯 Quick Manual Trade", 
-    "⚡ High-Edge Signal Scanner", 
-    "📜 Audit Log"
-])
-
-# --- TAB 1: ACTIVE PORTFOLIO & ONE-CLICK MANUAL SELLING ---
-with tab_terminal:
-    st.subheader("Active Holdings & One-Click Order Triggers")
-    if raw_positions:
-        for p in raw_positions:
-            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 3])
-            col1.write(f"**{p.symbol}** ({p.qty} shrs)")
-            col2.write(f"Entry: **${float(p.avg_entry_price):.2f}**")
-            col3.write(f"Current: **${float(p.current_price):.2f}**")
-            
-            pnl_val = float(p.unrealized_pl)
-            col4.markdown(f":{'green' if pnl_val >= 0 else 'red'}[**${pnl_val:+.2f} ({float(p.unrealized_plpc)*100:+.2f}%)**]")
-            
-            # Interactive Action Buttons per stock
-            with col5:
-                btn_buy, btn_sell = st.columns(2)
-                if btn_buy.button("➕ Buy +1", key=f"buy_more_{p.symbol}"):
-                    Send_Order(p.symbol, OrderSide.BUY, float(p.current_price), 1, "Manual Position Top-Up")
-                if btn_sell.button("❌ Close", key=f"close_{p.symbol}"):
-                    trading_client.close_position(p.symbol)
-                    st.toast(f"Liquidated position in {p.symbol}")
-            st.divider()
-    else:
-        st.info("No open positions in portfolio.")
-
-# --- TAB 2: MANUAL TRADE CONSOLE ---
-with tab_manual:
-    st.subheader("Manual Execution Terminal")
-    c1, c2, c3, c4 = st.columns(4)
-    manual_symbol = c1.selectbox("Select Ticker", TICKER_UNIVERSE)
-    manual_action = c2.radio("Order Side", ["BUY", "SELL"])
-    manual_qty = c3.number_input("Shares Quantity", min_value=1, max_value=100, value=1)
+    df = pd.DataFrame(ticks)
+    latest_price = df['price'].iloc[-1]
     
-    # Fetch current price for manual reference
-    snap = Compute_Statistical_Edge(manual_symbol)
-    ref_price = snap["Price"] if snap else 0.0
-    c4.metric("Live Reference Price", f"${ref_price:.2f}")
-
-    if st.button("🚀 SUBMIT MANUAL ORDER", use_container_width=True):
-        if ref_price > 0:
-            side = OrderSide.BUY if manual_action == "BUY" else OrderSide.SELL
-            Send_Order(manual_symbol, side, ref_price, manual_qty, f"Manual User Action ({manual_action})")
-        else:
-            st.error("Could not verify live price.")
-
-# --- TAB 3: PARALLEL MARKET SCANNER ---
-with tab_signals:
-    st.subheader("Institutional Multi-Factor Scanner")
-    snapshot = Parallel_Universe_Scan(TICKER_UNIVERSE)
+    # Calculate VWAP
+    df['pv'] = df['price'] * df['volume']
+    vwap = df['pv'].sum() / df['volume'].sum() if df['volume'].sum() > 0 else latest_price
     
-    open_orders = trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
-    pending_symbols = [o.symbol for o in open_orders]
-
-    scan_matrix = []
+    # EMAs
+    ema_fast = df['price'].ewm(span=5, adjust=False).mean().iloc[-1]
+    ema_slow = df['price'].ewm(span=15, adjust=False).mean().iloc[-1]
     
-    for symbol, data in snapshot.items():
-        price = data["Price"]
-        vwap = data["VWAP"]
-        ema_f = data["EMA_Fast"]
-        ema_s = data["EMA_Slow"]
-        dx = data["Trend_Strength"]
-        bullish = data["Bullish_Bias"]
+    # Volume Expansion Filter
+    vol_mean = df['volume'].mean()
+    latest_vol = df['volume'].iloc[-1]
+    volume_spike = latest_vol > (vol_mean * 1.5)
 
-        pos_info = active_pos_map.get(symbol, {"qty": 0, "pnl_pct": 0.0})
-        qty = pos_info["qty"]
-        pnl_pct = pos_info["pnl_pct"]
-
-        target_qty = int(MAX_CAPITAL_PER_TRADE // price)
-
-        # Risk Triggers
-        stop_loss = (qty > 0) and (pnl_pct <= -0.008)
-        take_profit = (qty > 0) and (pnl_pct >= 0.015)
-
-        # High-Edge Quantitative Signal (VWAP Support + Fast EMA + High ADX Trend Strength)
-        buy_signal = (
-            (price > vwap) and 
-            (ema_f > ema_s) and 
-            (bullish) and 
-            (dx > 20.0) and 
-            (qty == 0) and 
-            (target_qty >= 1) and 
-            (symbol not in pending_symbols)
-        )
+    # Position State
+    pos = active_positions.get(symbol, {"qty": 0, "entry": 0.0})
+    qty = pos["qty"]
+    entry = pos["entry"]
+    
+    pnl_pct = (latest_price - entry) / entry if qty > 0 and entry > 0 else 0.0
+    
+    # Strategy Rules
+    stop_loss = (qty > 0) and (pnl_pct <= -0.008)
+    take_profit = (qty > 0) and (pnl_pct >= 0.012)
+    
+    buy_edge = (latest_price > vwap) and (ema_fast > ema_slow) and volume_spike and (qty == 0)
+    sell_edge = ((ema_fast < ema_slow) or (latest_price < vwap)) and (qty > 0)
+    
+    if stop_loss:
+        return ("STOP_LOSS", qty), latest_price
+    elif take_profit:
+        return ("TAKE_PROFIT", qty), latest_price
+    elif buy_edge:
+        target_qty = max(1, int(MAX_CAPITAL_PER_TRADE // latest_price))
+        return ("BUY", target_qty), latest_price
+    elif sell_edge:
+        return ("SELL", qty), latest_price
         
-        sell_signal = ((ema_f < ema_s) or (price < vwap)) and (qty > 0)
+    return None, latest_price
 
-        status = "NEUTRAL"
-        if stop_loss:
-            status = "🛑 STOP LOSS"
-        elif take_profit:
-            status = "🎯 TAKE PROFIT"
-        elif buy_signal:
-            status = f"🟢 STRONG BUY ({target_qty} shrs)"
-        elif sell_signal:
-            status = "🔴 EXIT SIGNAL"
+# -------------------------------------------------------------------
+# 4. WEBSOCKET REAL-TIME TICK HANDLER
+# -------------------------------------------------------------------
+async def handle_trade_tick(data):
+    symbol = data.symbol
+    price = data.price
+    size = data.size
+    
+    # Cache up to 30 ticks per ticker
+    market_data_cache[symbol].append({"price": price, "volume": size})
+    if len(market_data_cache[symbol]) > 30:
+        market_data_cache[symbol].pop(0)
 
-        scan_matrix.append({
-            "Symbol": symbol,
-            "Price": f"${price:.2f}",
-            "VWAP": f"${vwap:.2f}",
-            "EMA (5/20)": f"${ema_f:.2f} / ${ema_s:.2f}",
-            "Trend Strength (ADX)": f"{dx:.1f}",
-            "Position": qty,
-            "PnL (%)": f"{pnl_pct*100:+.2f}%" if qty > 0 else "0.00%",
-            "Signal": status
-        })
+    if not bot_enabled:
+        return
 
-        # AUTOMATED EXECUTION ENGINE
-        if bot_active:
-            if stop_loss:
-                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Stop-Loss (-0.8%)")
-            elif take_profit:
-                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Take-Profit (+1.5%)")
-            elif buy_signal:
-                Send_Order(symbol, OrderSide.BUY, price, target_qty, "Auto Alpha Buy (VWAP + High ADX)")
-            elif sell_signal:
-                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Exit Signal (Trend Break)")
+    signal_info, current_price = evaluate_market_edge(symbol)
+    if not signal_info:
+        return
 
-    st.dataframe(pd.DataFrame(scan_matrix), use_container_width=True)
+    action, qty = signal_info
+    if action == "BUY":
+        await execute_order_async(symbol, OrderSide.BUY, current_price, qty, "Alpha Signal: VWAP + Volume Spike")
+    elif action in ["SELL", "STOP_LOSS", "TAKE_PROFIT"]:
+        await execute_order_async(symbol, OrderSide.SELL, current_price, qty, f"Exit Trigger: {action}")
 
-# --- TAB 4: AUDIT LOGS ---
-with tab_audit:
-    st.subheader("Order & Execution Audit Log")
-    if st.session_state.audit_log:
-        st.dataframe(pd.DataFrame(st.session_state.audit_log), use_container_width=True)
-    else:
-        st.info("No trade activity logged in this session.")
+# -------------------------------------------------------------------
+# 5. ASYNC MANUAL OVERRIDE TERMINAL
+# -------------------------------------------------------------------
+async def user_input_listener():
+    """Allows manual trade overrides via CLI without blocking market feeds."""
+    global bot_enabled
+    print("\n=======================================================")
+    print("🕹️  MANUAL CONTROL TERMINAL ACTIVE")
+    print("Commands:")
+    print("  b <symbol> <qty>  -> Manual Market Buy (e.g. 'b AAPL 1')")
+    print("  s <symbol> <qty>  -> Manual Market Sell (e.g. 's AAPL 1')")
+    print("  p                -> Panic Flush All Positions")
+    print("  t                -> Toggle Autonomous Bot ON/OFF")
+    print("=======================================================\n")
+    
+    loop = asyncio.get_event_loop()
+    while True:
+        user_cmd = await loop.run_in_executor(None, input, "COMMAND > ")
+        cmd_parts = user_cmd.strip().split()
+        if not cmd_parts:
+            continue
+            
+        action = cmd_parts[0].lower()
+        if action == 't':
+            bot_enabled = not bot_enabled
+            state = "ENABLED 🟢" if bot_enabled else "DISABLED 🔴"
+            print(f"--> Autonomous Trading Engine is now {state}")
+            
+        elif action == 'p':
+            print("🚨 PANIC FLUSH INITIATED! Liquidating all positions...")
+            trading_client.cancel_orders()
+            positions = trading_client.get_all_positions()
+            for p in positions:
+                trading_client.close_position(p.symbol)
+            print("✅ Portfolio Liquidated.")
+            
+        elif action in ['b', 's'] and len(cmd_parts) == 3:
+            sym = cmd_parts[1].upper()
+            qty = int(cmd_parts[2])
+            side = OrderSide.BUY if action == 'b' else OrderSide.SELL
+            
+            # Fetch latest cached price
+            ticks = market_data_cache.get(sym, [])
+            ref_price = ticks[-1]["price"] if ticks else 100.0
+            
+            asyncio.create_task(
+                execute_order_async(sym, side, ref_price, qty, f"Manual CLI Override ({side.value.upper()})")
+            )
+
+# -------------------------------------------------------------------
+# 6. ASYNC EVENT LOOP RUNNER
+# -------------------------------------------------------------------
+async def main():
+    stream_client.subscribe_trades(handle_trade_tick, *TICKERS)
+    
+    # Run WebSocket stream and Manual Input Listener concurrently
+    await asyncio.gather(
+        stream_client._run_forever(),
+        user_input_listener()
+    )
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutdown complete.")

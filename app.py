@@ -7,36 +7,35 @@ from concurrent.futures import ThreadPoolExecutor
 from streamlit_autorefresh import st_autorefresh
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, GetOrdersRequest
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
 # -------------------------------------------------------------------
-# 1. SETUP & CREDENTIALS
+# 1. SETUP & INITIALIZATION
 # -------------------------------------------------------------------
 load_dotenv()
 API_KEY = os.getenv("ALPACA_API_KEY") or st.secrets.get("ALPACA_API_KEY", None)
 SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or st.secrets.get("ALPACA_SECRET_KEY", None)
 
 if not API_KEY or not SECRET_KEY:
-    st.error("⚠️ Credentials missing! Add ALPACA_API_KEY and ALPACA_SECRET_KEY.")
+    st.error("⚠️ Credentials missing! Add ALPACA_API_KEY and ALPACA_SECRET_KEY to .env or Streamlit Secrets.")
     st.stop()
 
 trading_client = TradingClient(API_KEY, SECRET_KEY, paper=True)
 data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-st.set_page_config(page_title="Ultra-Low Latency Scalper", layout="wide")
-st.title("⚡ Ultra-Low Latency Quant Scalper & Portfolio Monitor")
+st.set_page_config(page_title="High-Frequency Control Terminal", layout="wide")
+st.title("⚡ Low-Latency Quant Engine & Manual Control Terminal")
 
-# Refresh every 1000ms (1 second) for near real-time state
-st_autorefresh(interval=1000, key="high_frequency_loop")
+# Rerun every 2 seconds for high-frequency updates
+st_autorefresh(interval=2000, key="quant_terminal_refresh")
 
 if "audit_log" not in st.session_state:
     st.session_state.audit_log = []
 
-# Broad Scanning Universe
 TICKER_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
     "NFLX", "INTC", "PYPL", "BAC", "JPM", "DIS", "XOM", "COP", "PFE"
@@ -46,39 +45,70 @@ MAX_CAPITAL_PER_TRADE = 100.0
 SLIPPAGE_PENALTY_PCT = 0.0005
 
 # -------------------------------------------------------------------
-# 2. CONCURRENT DATA FETCHING (LOW-LATENCY ENGINE)
+# 2. FAST PORTFOLIO & ORDER STATE SYNC
 # -------------------------------------------------------------------
-def Fetch_Single_Ticker_Metrics(symbol: str):
-    """
-    Worker function executed in parallel to fetch bars and compute indicators.
-    """
+def Get_Live_Portfolio():
+    try:
+        account = trading_client.get_account()
+        positions_raw = trading_client.get_all_positions()
+        pos_map = {
+            p.symbol: {
+                "qty": int(p.qty),
+                "avg_entry": float(p.avg_entry_price),
+                "price": float(p.current_price),
+                "market_val": float(p.market_value),
+                "unrealized_pl": float(p.unrealized_pl),
+                "pnl_pct": float(p.unrealized_plpc)
+            } for p in positions_raw
+        }
+        return account, pos_map, positions_raw
+    except Exception as e:
+        st.error(f"Portfolio Sync Error: {e}")
+        return None, {}, []
+
+# -------------------------------------------------------------------
+# 3. ADVANCED ALPHA SIGNAL ENGINE (VWAP + ADX + ATR EDGE)
+# -------------------------------------------------------------------
+def Compute_Statistical_Edge(symbol: str):
     try:
         request = StockBarsRequest(
             symbol_or_symbols=symbol,
             timeframe=TimeFrame.Minute,
-            limit=25
+            limit=35
         )
         bars = data_client.get_stock_bars(request)
         df = bars.df
-        if df.empty or len(df) < 15:
+        if df.empty or len(df) < 25:
             return None
 
-        # Extract price values
-        df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
-        df['pv'] = df['typical_price'] * df['volume']
+        # VWAP
+        df['tp'] = (df['high'] + df['low'] + df['close']) / 3
+        df['pv'] = df['tp'] * df['volume']
         vwap = df['pv'].sum() / df['volume'].sum() if df['volume'].sum() > 0 else df['close'].iloc[-1]
         
         latest_price = df['close'].iloc[-1]
         ema_fast = df['close'].ewm(span=5, adjust=False).mean().iloc[-1]
         ema_slow = df['close'].ewm(span=20, adjust=False).mean().iloc[-1]
-        
-        # ATR Calculation
+
+        # True Range & ATR
         tr = pd.concat([
             df['high'] - df['low'],
             (df['high'] - df['close'].shift()).abs(),
             (df['low'] - df['close'].shift()).abs()
         ], axis=1).max(axis=1)
-        atr = tr.rolling(10).mean().iloc[-1]
+        atr = tr.rolling(14).mean().iloc[-1]
+
+        # Directional Movement for Trend Strength (ADX Proxy)
+        up_move = df['high'].diff()
+        down_move = -df['low'].diff()
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        tr_smooth = tr.rolling(14).sum().iloc[-1]
+        plus_di = 100 * (pd.Series(plus_dm).rolling(14).sum().iloc[-1] / tr_smooth) if tr_smooth > 0 else 0
+        minus_di = 100 * (pd.Series(minus_dm).rolling(14).sum().iloc[-1] / tr_smooth) if tr_smooth > 0 else 0
+        
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di + 1e-6)) * 100
 
         return {
             "Symbol": symbol,
@@ -86,53 +116,26 @@ def Fetch_Single_Ticker_Metrics(symbol: str):
             "VWAP": vwap,
             "EMA_Fast": ema_fast,
             "EMA_Slow": ema_slow,
-            "ATR": atr
+            "ATR": atr,
+            "Trend_Strength": dx,
+            "Bullish_Bias": plus_di > minus_di
         }
     except Exception:
         return None
 
-def Fast_Parallel_Universe_Scan(universe):
-    """
-    Spawns worker threads to pull all tickers simultaneously in sub-second time.
-    """
+def Parallel_Universe_Scan(universe):
     results = {}
-    with ThreadPoolExecutor(max_workers=len(universe)) as executor:
-        out = executor.map(Fetch_Single_Ticker_Metrics, universe)
+    with ThreadPoolExecutor(max_workers=min(len(universe), 12)) as executor:
+        out = executor.map(Compute_Statistical_Edge, universe)
         for res in out:
             if res:
                 results[res["Symbol"]] = res
     return results
 
 # -------------------------------------------------------------------
-# 3. REAL-TIME PORTFOLIO & POSITION AUDITOR
+# 4. ORDER ROUTER & MANUAL EXECUTION CONTROLLER
 # -------------------------------------------------------------------
-def Get_Live_Portfolio_State():
-    """
-    Direct sync with Alpaca account & position state.
-    """
-    try:
-        account = trading_client.get_account()
-        positions_raw = trading_client.get_all_positions()
-        
-        active_pos_map = {}
-        for p in positions_raw:
-            active_pos_map[p.symbol] = {
-                "qty": int(p.qty),
-                "avg_entry": float(p.avg_entry_price),
-                "current_price": float(p.current_price),
-                "market_value": float(p.market_value),
-                "unrealized_pl": float(p.unrealized_pl),
-                "unrealized_plpc": float(p.unrealized_plpc)
-            }
-        return account, active_pos_map, positions_raw
-    except Exception as e:
-        st.error(f"Portfolio Sync Failure: {e}")
-        return None, {}, []
-
-# -------------------------------------------------------------------
-# 4. ORDER ROUTING & FRICTION ENGINE
-# -------------------------------------------------------------------
-def Execute_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: str):
+def Send_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: str):
     try:
         limit_price = round(price * (1 + SLIPPAGE_PENALTY_PCT), 2) if side == OrderSide.BUY else round(price * (1 - SLIPPAGE_PENALTY_PCT), 2)
         
@@ -152,85 +155,141 @@ def Execute_Order(symbol: str, side: OrderSide, price: float, qty: int, reason: 
             "Side": side.value.upper(),
             "Qty": qty,
             "Limit Price": f"${limit_price:.2f}",
+            "Type": "AUTOBOT" if "Manual" not in reason else "MANUAL",
             "Reason": reason
         })
-        st.toast(f"⚡ ORDER SENT: {side.value.upper()} {qty} {symbol} @ ${limit_price:.2f}")
+        st.toast(f"⚡ ORDER EXECUTED: {side.value.upper()} {qty} {symbol} @ ${limit_price:.2f}")
     except Exception as e:
-        st.error(f"Order Execution Failed ({symbol}): {str(e)}")
+        st.error(f"Execution Error ({symbol}): {str(e)}")
 
 # -------------------------------------------------------------------
-# 5. MAIN EXECUTION CONTROLLER
+# 5. DASHBOARD LAYOUT & CONTROLS
 # -------------------------------------------------------------------
-account, active_pos_map, raw_positions = Get_Live_Portfolio_State()
+account, active_pos_map, raw_positions = Get_Live_Portfolio()
 
-st.sidebar.header("🕹️ Low-Latency Controller")
-bot_active = st.sidebar.toggle("🟢 Activate Engine", value=False)
+# Sidebar Control Station
+st.sidebar.header("🕹️ Execution Controls")
+bot_active = st.sidebar.toggle("🟢 Activate Autonomous Trading Engine", value=False)
 
 if account:
-    st.sidebar.metric("Account Equity", f"${float(account.equity):,.2f}")
+    st.sidebar.metric("Portfolio Equity", f"${float(account.equity):,.2f}")
     st.sidebar.metric("Buying Power", f"${float(account.buying_power):,.2f}")
 
-tab_portfolio, tab_signals, tab_logs = st.tabs(["💼 Live Real-Time Portfolio", "⚡ Fast Signal Scanner", "📜 Audit Engine"])
+st.sidebar.markdown("---")
+st.sidebar.subheader("🚨 Emergency Overrides")
 
-# --- TAB 1: REAL-TIME PORTFOLIO DISPLAY ---
-with tab_portfolio:
-    st.subheader("Current Active Positions")
+if st.sidebar.button("💥 CANCEL ALL PENDING ORDERS"):
+    trading_client.cancel_orders()
+    st.sidebar.success("All pending orders canceled.")
+
+if st.sidebar.button("🔥 PANIC LIQUIDATE ENTIRE PORTFOLIO"):
+    trading_client.cancel_orders()
+    for sym, pos in active_pos_map.items():
+        if pos["qty"] > 0:
+            trading_client.close_position(sym)
+    st.sidebar.warning("Liquidated all active positions.")
+
+# Tabs
+tab_terminal, tab_manual, tab_signals, tab_audit = st.tabs([
+    "💼 Portfolio & Direct Controls", 
+    "🎯 Quick Manual Trade", 
+    "⚡ High-Edge Signal Scanner", 
+    "📜 Audit Log"
+])
+
+# --- TAB 1: ACTIVE PORTFOLIO & ONE-CLICK MANUAL SELLING ---
+with tab_terminal:
+    st.subheader("Active Holdings & One-Click Order Triggers")
     if raw_positions:
-        p_data = []
         for p in raw_positions:
-            p_data.append({
-                "Symbol": p.symbol,
-                "Quantity": p.qty,
-                "Avg Entry": f"${float(p.avg_entry_price):.2f}",
-                "Current Price": f"${float(p.current_price):.2f}",
-                "Market Value": f"${float(p.market_value):,.2f}",
-                "Unrealized P/L ($)": f"${float(p.unrealized_pl):,.2f}",
-                "Unrealized P/L (%)": f"{float(p.unrealized_plpc)*100:+.2f}%"
-            })
-        st.dataframe(pd.DataFrame(p_data), use_container_width=True)
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 3])
+            col1.write(f"**{p.symbol}** ({p.qty} shrs)")
+            col2.write(f"Entry: **${float(p.avg_entry_price):.2f}**")
+            col3.write(f"Current: **${float(p.current_price):.2f}**")
+            
+            pnl_val = float(p.unrealized_pl)
+            col4.markdown(f":{'green' if pnl_val >= 0 else 'red'}[**${pnl_val:+.2f} ({float(p.unrealized_plpc)*100:+.2f}%)**]")
+            
+            # Interactive Action Buttons per stock
+            with col5:
+                btn_buy, btn_sell = st.columns(2)
+                if btn_buy.button("➕ Buy +1", key=f"buy_more_{p.symbol}"):
+                    Send_Order(p.symbol, OrderSide.BUY, float(p.current_price), 1, "Manual Position Top-Up")
+                if btn_sell.button("❌ Close", key=f"close_{p.symbol}"):
+                    trading_client.close_position(p.symbol)
+                    st.toast(f"Liquidated position in {p.symbol}")
+            st.divider()
     else:
-        st.info("No active open positions in portfolio.")
+        st.info("No open positions in portfolio.")
 
-# --- TAB 2: PARALLEL SIGNAL SCANNER & BOT EXECUTION ---
-with tab_signals:
-    st.subheader("Sub-Second Dynamic Market Scanner")
+# --- TAB 2: MANUAL TRADE CONSOLE ---
+with tab_manual:
+    st.subheader("Manual Execution Terminal")
+    c1, c2, c3, c4 = st.columns(4)
+    manual_symbol = c1.selectbox("Select Ticker", TICKER_UNIVERSE)
+    manual_action = c2.radio("Order Side", ["BUY", "SELL"])
+    manual_qty = c3.number_input("Shares Quantity", min_value=1, max_value=100, value=1)
     
-    # Run multi-threaded parallel data fetch
-    market_snapshot = Fast_Parallel_Universe_Scan(TICKER_UNIVERSE)
+    # Fetch current price for manual reference
+    snap = Compute_Statistical_Edge(manual_symbol)
+    ref_price = snap["Price"] if snap else 0.0
+    c4.metric("Live Reference Price", f"${ref_price:.2f}")
+
+    if st.button("🚀 SUBMIT MANUAL ORDER", use_container_width=True):
+        if ref_price > 0:
+            side = OrderSide.BUY if manual_action == "BUY" else OrderSide.SELL
+            Send_Order(manual_symbol, side, ref_price, manual_qty, f"Manual User Action ({manual_action})")
+        else:
+            st.error("Could not verify live price.")
+
+# --- TAB 3: PARALLEL MARKET SCANNER ---
+with tab_signals:
+    st.subheader("Institutional Multi-Factor Scanner")
+    snapshot = Parallel_Universe_Scan(TICKER_UNIVERSE)
     
     open_orders = trading_client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN))
     pending_symbols = [o.symbol for o in open_orders]
 
     scan_matrix = []
     
-    for symbol, data in market_snapshot.items():
+    for symbol, data in snapshot.items():
         price = data["Price"]
         vwap = data["VWAP"]
         ema_f = data["EMA_Fast"]
         ema_s = data["EMA_Slow"]
-        atr = data["ATR"]
+        dx = data["Trend_Strength"]
+        bullish = data["Bullish_Bias"]
 
-        pos_info = active_pos_map.get(symbol, {"qty": 0, "unrealized_plpc": 0.0})
+        pos_info = active_pos_map.get(symbol, {"qty": 0, "pnl_pct": 0.0})
         qty = pos_info["qty"]
-        pnl_pct = pos_info["unrealized_plpc"]
+        pnl_pct = pos_info["pnl_pct"]
 
         target_qty = int(MAX_CAPITAL_PER_TRADE // price)
 
-        # Risk Controls
+        # Risk Triggers
         stop_loss = (qty > 0) and (pnl_pct <= -0.008)
         take_profit = (qty > 0) and (pnl_pct >= 0.015)
 
-        # Signal Triggers
-        buy_signal = (ema_f > ema_s) and (price > vwap) and (qty == 0) and (target_qty >= 1) and (symbol not in pending_symbols)
+        # High-Edge Quantitative Signal (VWAP Support + Fast EMA + High ADX Trend Strength)
+        buy_signal = (
+            (price > vwap) and 
+            (ema_f > ema_s) and 
+            (bullish) and 
+            (dx > 20.0) and 
+            (qty == 0) and 
+            (target_qty >= 1) and 
+            (symbol not in pending_symbols)
+        )
+        
         sell_signal = ((ema_f < ema_s) or (price < vwap)) and (qty > 0)
 
-        status = "HOLDING/NEUTRAL"
+        status = "NEUTRAL"
         if stop_loss:
             status = "🛑 STOP LOSS"
         elif take_profit:
             status = "🎯 TAKE PROFIT"
         elif buy_signal:
-            status = f"🟢 BUY ({target_qty} shrs)"
+            status = f"🟢 STRONG BUY ({target_qty} shrs)"
         elif sell_signal:
             status = "🔴 EXIT SIGNAL"
 
@@ -238,29 +297,30 @@ with tab_signals:
             "Symbol": symbol,
             "Price": f"${price:.2f}",
             "VWAP": f"${vwap:.2f}",
-            "EMA Fast/Slow": f"${ema_f:.2f} / ${ema_s:.2f}",
-            "Position Qty": qty,
-            "Unrealized PnL": f"{pnl_pct*100:+.2f}%" if qty > 0 else "0.00%",
+            "EMA (5/20)": f"${ema_f:.2f} / ${ema_s:.2f}",
+            "Trend Strength (ADX)": f"{dx:.1f}",
+            "Position": qty,
+            "PnL (%)": f"{pnl_pct*100:+.2f}%" if qty > 0 else "0.00%",
             "Signal": status
         })
 
-        # AUTOMATED BOT ROUTING
+        # AUTOMATED EXECUTION ENGINE
         if bot_active:
             if stop_loss:
-                Execute_Order(symbol, OrderSide.SELL, price, qty, "Hard Stop Loss (-0.8%)")
+                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Stop-Loss (-0.8%)")
             elif take_profit:
-                Execute_Order(symbol, OrderSide.SELL, price, qty, "Take Profit Target (+1.5%)")
+                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Take-Profit (+1.5%)")
             elif buy_signal:
-                Execute_Order(symbol, OrderSide.BUY, price, target_qty, "VWAP + Fast EMA Crossover Trigger")
+                Send_Order(symbol, OrderSide.BUY, price, target_qty, "Auto Alpha Buy (VWAP + High ADX)")
             elif sell_signal:
-                Execute_Order(symbol, OrderSide.SELL, price, qty, "Trend Breakdown Exit")
+                Send_Order(symbol, OrderSide.SELL, price, qty, "Auto Exit Signal (Trend Break)")
 
     st.dataframe(pd.DataFrame(scan_matrix), use_container_width=True)
 
-# --- TAB 3: AUDIT LOGS ---
-with tab_logs:
-    st.subheader("Live Execution Log")
+# --- TAB 4: AUDIT LOGS ---
+with tab_audit:
+    st.subheader("Order & Execution Audit Log")
     if st.session_state.audit_log:
         st.dataframe(pd.DataFrame(st.session_state.audit_log), use_container_width=True)
     else:
-        st.info("No trade activity logged in current session.")
+        st.info("No trade activity logged in this session.")

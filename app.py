@@ -1,96 +1,109 @@
-import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-from engine import GoatedEngine
+import numpy as np
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from datetime import datetime, timedelta
 
-# PAGE CONFIG
-st.set_page_config(page_title="Goated Algo Suite", layout="wide", page_icon="🚀")
+class GoatedEngine:
+    def __init__(self, api_key, api_secret):
+        self.client = StockHistoricalDataClient(api_key, api_secret)
 
-# PULL SECRETS
-try:
-    API_KEY = st.secrets["ALPACA_KEY"]
-    API_SECRET = st.secrets["ALPACA_SECRET"]
-except:
-    st.error("⚠️ API Keys not found in Streamlit Secrets! Please add ALPACA_KEY and ALPACA_SECRET.")
-    st.stop()
-
-# STYLING
-st.markdown("""
-    <style>
-    .metric-card { background-color: #1e2130; padding: 20px; border-radius: 10px; border: 1px solid #4e5d6c; }
-    </style>
-""", unsafe_allow_html=True)
-
-# SIDEBAR
-st.sidebar.title("🎮 Command Center")
-selected_symbols = st.sidebar.multiselect("Assets", ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "BTC/USD"], default=["NVDA", "TSLA"])
-tf = st.sidebar.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=1)
-days = st.sidebar.slider("History (Days)", 1, 365, 30)
-ext_hours = st.sidebar.toggle("Include Extended Hours", value=True)
-
-st.sidebar.divider()
-st.sidebar.subheader("Strategy Parameters")
-fast_p = st.sidebar.number_input("EMA Fast", 5, 50, 12)
-slow_p = st.sidebar.number_input("EMA Slow", 10, 200, 26)
-slip = st.sidebar.slider("Slippage (BPS)", 0, 100, 5)
-
-# MAIN UI
-st.title("🚀 Goated Institutional Algo Trader")
-st.info("System Status: Logic Active • Shorting Enabled • ATR Position Sizing")
-
-engine = GoatedEngine(API_KEY, API_SECRET)
-
-if st.button("🔥 EXECUTE RESEARCH PIPELINE"):
-    with st.spinner("Processing Market Data..."):
-        # 1. Get Data
-        raw_data = engine.get_data(selected_symbols, tf, days, ext_hours)
+    def get_data(self, symbols, timeframe_str, days_back, use_ext_hours):
+        tf_map = {"1Min": TimeFrame.Minute, "5Min": TimeFrame.Minute, "15Min": TimeFrame.Minute, "1Hour": TimeFrame.Hour, "1Day": TimeFrame.Day}
+        tf = tf_map.get(timeframe_str, TimeFrame.Minute)
+        start = datetime.now() - timedelta(days=days_back)
         
-        # 2. Apply Logic
-        df_map = {}
-        for s in selected_symbols:
-            symbol_df = raw_data[raw_data.index.get_level_values(0) == s]
-            df_map[s] = engine.apply_strategy(symbol_df, {"ema_fast": fast_p, "ema_slow": slow_p})
+        req = StockBarsRequest(
+            symbol_or_symbols=symbols, 
+            timeframe=tf, 
+            start=start,
+            feed='sip'
+        )
         
-        # 3. Backtest
-        config = {"initial_capital": 100000, "slip_bps": slip}
-        equity = engine.run_backtest(df_map, config)
-        
-        # 4. RESULTS
-        col1, col2, col3, col4 = st.columns(4)
-        final_ret = (equity.iloc[-1] / 100000) - 1
-        daily_rets = equity.pct_change().dropna()
-        sharpe = (daily_rets.mean() / daily_rets.std()) * (252**0.5) if len(daily_rets) > 0 else 0
-        max_dd = (equity / equity.cummax() - 1).min()
-        
-        col1.metric("Net Profit", f"${equity.iloc[-1]-100000:,.2f}", f"{final_ret:.2%}")
-        col2.metric("Institutional Sharpe", f"{sharpe:.2f}")
-        col3.metric("Max Drawdown", f"{max_dd:.2%}")
-        col4.metric("Volatility (Daily)", f"{daily_rets.std():.2%}")
+        df = self.client.get_stock_bars(req).df
+        df.index = df.index.get_level_values(1)
+        if not use_ext_hours:
+            df = df.between_time('09:30', '16:00')
+        return df
 
-        # CHARTS
-        st.divider()
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=equity.index, y=equity.values, name="Portfolio Value", line=dict(color="#00ffcc", width=3)))
-        fig.update_layout(title="Mark-to-Market Equity Curve", template="plotly_dark", height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-        # THE "THINKING" ENGINE (Visualizing Signals)
-        st.subheader("🧠 Strategy 'Thinking' Process")
-        target_s = st.selectbox("View Decision Logic for:", selected_symbols)
-        view_df = df_map[target_s].tail(100).copy()
+    @staticmethod
+    def apply_strategy(df, params):
+        df = df.copy()
         
-        # Add human-readable thought process
-        def explain(row):
-            if row['signal'] == 1: return "BULLISH: Fast EMA > Slow EMA & Price above VWAP. Buying Strength."
-            if row['signal'] == -1: return "BEARISH: Fast EMA < Slow EMA & Price below VWAP. Shorting Weakness."
-            return "NEUTRAL: Waiting for trend alignment or VWAP confirmation."
+        # 1. Institutional VWAP
+        df['tp'] = (df['high'] + df['low'] + df['close']) / 3
+        df['pv'] = df['tp'] * df['volume']
+        df['vwap'] = df.groupby(df.index.date, group_keys=False).apply(
+            lambda x: x['pv'].cumsum() / x['volume'].cumsum()
+        )
         
-        view_df['Decision_Logic'] = view_df.apply(explain, axis=1)
-        st.dataframe(view_df[['close', 'vwap', 'ema_f', 'ema_s', 'rsi', 'signal', 'Decision_Logic']], use_container_width=True)
+        # 2. Pure Pandas EMA (No pandas-ta needed)
+        df['ema_f'] = df['close'].ewm(span=params['ema_fast'], adjust=False).mean()
+        df['ema_s'] = df['close'].ewm(span=params['ema_slow'], adjust=False).mean()
+        
+        # 3. Pure Pandas ATR
+        high_low = df['high'] - df['low']
+        high_cp = np.abs(df['high'] - df['close'].shift())
+        low_cp = np.abs(df['low'] - df['close'].shift())
+        df['atr'] = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1).rolling(14).mean()
+        
+        # 4. Pure Pandas RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # 5. Signal Logic
+        df['signal'] = 0
+        long_cond = (df['ema_f'] > df['ema_s']) & (df['close'] > df['vwap']) & (df['rsi'] < 70)
+        short_cond = (df['ema_f'] < df['ema_s']) & (df['close'] < df['vwap']) & (df['rsi'] > 30)
+        
+        df.loc[long_cond, 'signal'] = 1
+        df.loc[short_cond, 'signal'] = -1
+        return df.fillna(0)
 
-st.divider()
-st.subheader("📡 Live Execution Feed (Paper)")
-if st.toggle("Activate Live Signal Monitor"):
-    st.toast("Connecting to Alpaca WebSocket...")
-    st.write("Current Status: Scanning for EMA Crosses + VWAP Breakouts...")
-    st.progress(0.4, "Waiting for bar close...")
+    @staticmethod
+    def run_backtest(df_map, config):
+        # Flatten all timestamps from all symbols
+        all_ts = sorted(pd.concat([df.index.to_series() for df in df_map.values()]).unique())
+        cash = config['initial_capital']
+        positions = {s: 0 for s in df_map.keys()}
+        equity_curve = []
+        
+        for ts in all_ts:
+            mtm_value = cash
+            for symbol, df in df_map.items():
+                if ts not in df.index: continue
+                row = df.loc[ts]
+                
+                # Portfolio MTM
+                mtm_value += positions[symbol] * row['close']
+                
+                # T+1 Logic: Look at signal from PREVIOUS bar to trade at CURRENT bar open
+                idx = df.index.get_loc(ts)
+                if idx == 0: continue
+                
+                prev_sig = df['signal'].iloc[idx-1]
+                curr_sig = df['signal'].iloc[idx]
+                
+                if prev_sig != curr_sig:
+                    # Liquidation
+                    cash += positions[symbol] * row['open']
+                    positions[symbol] = 0
+                    
+                    # New Entry
+                    if curr_sig != 0:
+                        risk_amt = mtm_value * 0.01
+                        atr = row['atr'] if row['atr'] > 0 else row['close'] * 0.01
+                        shares = int(risk_amt / atr)
+                        
+                        positions[symbol] = shares * curr_sig
+                        cash -= positions[symbol] * row['open']
+                        # Slippage
+                        cash -= abs(shares * (row['open'] * (config['slip_bps']/10000)))
+
+            equity_curve.append(mtm_value)
+            
+        return pd.Series(equity_curve, index=all_ts)

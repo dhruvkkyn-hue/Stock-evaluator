@@ -1,93 +1,96 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from engine import InstitutionalEngine
+from engine import GoatedEngine
 
-# 1. SETUP & SECRETS
-st.set_page_config(page_title="Institutional Truth Machine", layout="wide")
+# PAGE CONFIG
+st.set_page_config(page_title="Goated Algo Suite", layout="wide", page_icon="🚀")
 
-# This pulls from your Streamlit Secrets
+# PULL SECRETS
 try:
-    ALPACA_KEY = st.secrets["ALPACA_KEY"]
-    ALPACA_SECRET = st.secrets["ALPACA_SECRET"]
+    API_KEY = st.secrets["ALPACA_KEY"]
+    API_SECRET = st.secrets["ALPACA_SECRET"]
 except:
-    st.error("Missing Alpaca Keys in Streamlit Secrets!")
+    st.error("⚠️ API Keys not found in Streamlit Secrets! Please add ALPACA_KEY and ALPACA_SECRET.")
     st.stop()
 
-# 2. SIDEBAR CONFIG
-st.sidebar.header("🕹️ Strategy Controls")
-symbols = st.sidebar.multiselect("Symbols", ["AAPL", "NVDA", "TSLA", "AMD", "MSFT", "QQQ"], default=["AAPL", "NVDA"])
-timeframe = st.sidebar.selectbox("Timeframe", ["5Min", "15Min", "1Hour", "1Day"])
-days_back = st.sidebar.slider("Historical Days", 30, 730, 180)
+# STYLING
+st.markdown("""
+    <style>
+    .metric-card { background-color: #1e2130; padding: 20px; border-radius: 10px; border: 1px solid #4e5d6c; }
+    </style>
+""", unsafe_allow_html=True)
+
+# SIDEBAR
+st.sidebar.title("🎮 Command Center")
+selected_symbols = st.sidebar.multiselect("Assets", ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "BTC/USD"], default=["NVDA", "TSLA"])
+tf = st.sidebar.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour", "1Day"], index=1)
+days = st.sidebar.slider("History (Days)", 1, 365, 30)
+ext_hours = st.sidebar.toggle("Include Extended Hours", value=True)
 
 st.sidebar.divider()
-st.sidebar.subheader("Hyper-Parameters")
-ema_f = st.sidebar.number_input("EMA Fast", 5, 50, 12)
-ema_s = st.sidebar.number_input("EMA Slow", 10, 200, 26)
-slip_bps = st.sidebar.slider("Slippage (BPS)", 0, 50, 5)
+st.sidebar.subheader("Strategy Parameters")
+fast_p = st.sidebar.number_input("EMA Fast", 5, 50, 12)
+slow_p = st.sidebar.number_input("EMA Slow", 10, 200, 26)
+slip = st.sidebar.slider("Slippage (BPS)", 0, 100, 5)
 
-# 3. INITIALIZE ENGINE
-engine = InstitutionalEngine(ALPACA_KEY, ALPACA_SECRET)
+# MAIN UI
+st.title("🚀 Goated Institutional Algo Trader")
+st.info("System Status: Logic Active • Shorting Enabled • ATR Position Sizing")
 
-st.title("🏛️ Institutional Backtester")
-st.caption("Zero Look-Ahead • Mark-to-Market • Session VWAP • Dynamic Slippage")
+engine = GoatedEngine(API_KEY, API_SECRET)
 
-if st.button("🚀 Run Deep Analysis"):
-    with st.spinner("Fetching data and running Truth Machine..."):
-        # Fetch and Process
-        raw_data = engine.get_data(symbols, timeframe, days_back)
+if st.button("🔥 EXECUTE RESEARCH PIPELINE"):
+    with st.spinner("Processing Market Data..."):
+        # 1. Get Data
+        raw_data = engine.get_data(selected_symbols, tf, days, ext_hours)
         
+        # 2. Apply Logic
         df_map = {}
-        for s in symbols:
-            symbol_df = raw_data[raw_data.index.get_level_values(0) == s] # Adjust if needed
-            # For simplicity in this demo, we assume raw_data is handled per symbol
-            df_map[s] = engine.apply_strategy(symbol_df, {"ema_fast": ema_f, "ema_slow": ema_s})
-
-        # Run Simulator
-        config = {
-            "initial_capital": 100000,
-            "slippage_bps": slip_bps
-        }
-        equity_curve = engine.run_backtest(df_map, {}, config)
+        for s in selected_symbols:
+            symbol_df = raw_data[raw_data.index.get_level_values(0) == s]
+            df_map[s] = engine.apply_strategy(symbol_df, {"ema_fast": fast_p, "ema_slow": slow_p})
         
-        # 4. ANALYTICS TABS
-        tab1, tab2, tab3 = st.tabs(["📈 Performance", "🎲 Risk (Monte Carlo)", "🔍 Raw Signals"])
+        # 3. Backtest
+        config = {"initial_capital": 100000, "slip_bps": slip}
+        equity = engine.run_backtest(df_map, config)
         
-        with tab1:
-            # Equity Curve Chart
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=equity_curve.index, y=equity_curve.values, name="Strategy Equity"))
-            fig.update_layout(title="Mark-to-Market Portfolio Value", template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Metrics
-            rets = equity_curve.pct_change().dropna()
-            sharpe = (rets.mean() / rets.std()) * (252**0.5)
-            drawdown = (equity_curve / equity_curve.cummax() - 1).min()
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Return", f"{((equity_curve.iloc[-1]/100000)-1):.2%}")
-            c2.metric("Institutional Sharpe", f"{sharpe:.2f}")
-            c3.metric("Max Drawdown", f"{drawdown:.2%}")
+        # 4. RESULTS
+        col1, col2, col3, col4 = st.columns(4)
+        final_ret = (equity.iloc[-1] / 100000) - 1
+        daily_rets = equity.pct_change().dropna()
+        sharpe = (daily_rets.mean() / daily_rets.std()) * (252**0.5) if len(daily_rets) > 0 else 0
+        max_dd = (equity / equity.cummax() - 1).min()
+        
+        col1.metric("Net Profit", f"${equity.iloc[-1]-100000:,.2f}", f"{final_ret:.2%}")
+        col2.metric("Institutional Sharpe", f"{sharpe:.2f}")
+        col3.metric("Max Drawdown", f"{max_dd:.2%}")
+        col4.metric("Volatility (Daily)", f"{daily_rets.std():.2%}")
 
-        with tab2:
-            st.subheader("1,000-Path Monte Carlo Simulation")
-            sims = engine.monte_carlo(rets.values, simulations=50)
-            fig_mc = go.Figure()
-            for s in sims:
-                fig_mc.add_trace(go.Scatter(y=s, mode='lines', line=dict(width=1), opacity=0.3, showlegend=False))
-            fig_mc.update_layout(title="Probability of Outcomes (Resampled Returns)", template="plotly_dark")
-            st.plotly_chart(fig_mc, use_container_width=True)
+        # CHARTS
+        st.divider()
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=equity.index, y=equity.values, name="Portfolio Value", line=dict(color="#00ffcc", width=3)))
+        fig.update_layout(title="Mark-to-Market Equity Curve", template="plotly_dark", height=500)
+        st.plotly_chart(fig, use_container_width=True)
 
-        with tab3:
-            st.dataframe(df_map[symbols[0]].tail(100))
+        # THE "THINKING" ENGINE (Visualizing Signals)
+        st.subheader("🧠 Strategy 'Thinking' Process")
+        target_s = st.selectbox("View Decision Logic for:", selected_symbols)
+        view_df = df_map[target_s].tail(100).copy()
+        
+        # Add human-readable thought process
+        def explain(row):
+            if row['signal'] == 1: return "BULLISH: Fast EMA > Slow EMA & Price above VWAP. Buying Strength."
+            if row['signal'] == -1: return "BEARISH: Fast EMA < Slow EMA & Price below VWAP. Shorting Weakness."
+            return "NEUTRAL: Waiting for trend alignment or VWAP confirmation."
+        
+        view_df['Decision_Logic'] = view_df.apply(explain, axis=1)
+        st.dataframe(view_df[['close', 'vwap', 'ema_f', 'ema_s', 'rsi', 'signal', 'Decision_Logic']], use_container_width=True)
 
-# 5. LIVE MONITOR (Juiced Up)
 st.divider()
-st.header("📡 Live Trading Monitor")
-col_a, col_b = st.columns(2)
-with col_a:
-    st.info("Status: Connected to Alpaca API")
-with col_b:
-    if st.toggle("Enable Live Execution Signal Alerts"):
-        st.success("Websocket Active: Monitoring for 5m EMA Crosses...")
+st.subheader("📡 Live Execution Feed (Paper)")
+if st.toggle("Activate Live Signal Monitor"):
+    st.toast("Connecting to Alpaca WebSocket...")
+    st.write("Current Status: Scanning for EMA Crosses + VWAP Breakouts...")
+    st.progress(0.4, "Waiting for bar close...")

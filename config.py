@@ -1,15 +1,26 @@
-import os
+# config.py
+import numpy as np
 
-# System Execution Limits
-INITIAL_CAPITAL = 100,000.0
-MAX_DRAWDOWN_PCT = 0.02          # 2% Max Drawdown Circuit Breaker
-MAX_POSITION_PCT = 0.10          # Max 10% capital in a single trade
-MIN_EXPECTED_EDGE_BPS = 8.0      # Must have at least 8 bps EV net of costs
-
-# Options / Equity Slippage & Fee Models
-COMMISSION_PER_SHARE = 0.005     # $0.005 / share
-ESTIMATED_SLIPPAGE_BPS = 0.0002  # 2 bps estimated market impact
-
-# Watchlist File Location
-WATCHLIST_FILE = "watchlist.txt"
-AUDIT_LOG_FILE = "audit_log.txt"
+CONFIG = {
+    "initial_capital": 100000,
+    "symbols": ["AAPL", "MSFT", "TSLA", "NVDA", "AMD"],
+    "timeframe": "5Min",
+    "risk": {
+        "max_drawdown_limit": 0.15,
+        "max_daily_loss": 0.02,
+        "max_participation_rate": 0.1,  # Can't trade more than 10% of bar volume
+        "slippage_bps": 2.0,            # 2 basis points
+        "commissions_per_share": 0.005
+    },
+    "wfo": {
+        "train_months": 6,
+        "val_months": 1,
+        "holdout_months": 3
+    },
+    "param_grid": {
+        "ema_fast": [9, 12, 20],
+        "ema_slow": [21, 50, 100],
+        "rsi_period": [14],
+        "vwap_dist": [0.0, 0.001] # Distance from VWAP to trigger
+    }
+}

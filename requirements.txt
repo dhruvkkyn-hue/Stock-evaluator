@@ -4,6 +4,5 @@ alpaca-py
 pyarrow
 plotly
 scipy
-matplotlib
 streamlit
-python-dotenv
+streamlit-autorefresh

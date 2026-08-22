@@ -10,12 +10,12 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 # --- 1. SYSTEM INITIALIZATION ---
-st.set_page_config(page_title="Apex Institutional Terminal", layout="wide", page_icon="🏦")
-st_autorefresh(interval=15000, key="bot_heartbeat") # 15-second high-speed refresh
+st.set_page_config(page_title="Apex Predator Intraday", layout="wide", page_icon="🦈")
+st_autorefresh(interval=15000, key="bot_heartbeat") 
 
 try:
     API_KEY = st.secrets["ALPACA_KEY"]
@@ -28,163 +28,132 @@ except Exception:
     st.error("⚠️ SECRETS ERROR: Add ALPACA_KEY and ALPACA_SECRET to Streamlit Secrets.")
     st.stop()
 
-# --- 2. THE ALPHA ENGINE (Fixed for Duplicate Labels) ---
+# --- 2. ALPHA ENGINE: INTRADAY JUICE ---
 class AlphaEngine:
     @staticmethod
-    def analyze_batch(df):
-        """Fixes 'Duplicate Labels' by processing within the MultiIndex structure."""
+    def analyze(df):
         if df is None or df.empty: return None
-        
-        # Ensure we are working with a clean copy and symbol-timestamp index
         df = df.copy()
         
-        # 1. Vectorized Indicators per Symbol (The 'Magic' for 40+ stocks)
-        # We use groupby(level=0) because level 0 is 'symbol' in Alpaca's MultiIndex
-        df['ema_f'] = df.groupby(level=0)['close'].transform(lambda x: x.ewm(span=9, adjust=False).mean())
-        df['ema_s'] = df.groupby(level=0)['close'].transform(lambda x: x.ewm(span=21, adjust=False).mean())
+        # A. TREND HIERARCHY (Institutional Confluence)
+        # Fast EMA (9), Medium EMA (21), Slow EMA (50)
+        df['ema_9'] = df.groupby(level=0)['close'].transform(lambda x: x.ewm(span=9).mean())
+        df['ema_21'] = df.groupby(level=0)['close'].transform(lambda x: x.ewm(span=21).mean())
+        df['ema_50'] = df.groupby(level=0)['close'].transform(lambda x: x.ewm(span=50).mean())
         
-        # 2. Daily Resetting VWAP
+        # B. INSTITUTIONAL VALUE (Anchored VWAP)
         df['tp'] = (df['high'] + df['low'] + df['close']) / 3
         df['pv'] = df['tp'] * df['volume']
-        
-        # Extract date from index level 1 (timestamp)
         df['date'] = df.index.get_level_values(1).date
+        gb = df.groupby([df.index.get_level_values(0), 'date'])
+        df['vwap'] = gb['pv'].cumsum() / gb['volume'].cumsum()
         
-        # Group by symbol AND date for the institutional daily reset
-        gb_vwap = df.groupby([df.index.get_level_values(0), 'date'])
-        df['vwap'] = gb_vwap['pv'].cumsum() / gb_vwap['volume'].cumsum()
+        # C. RELATIVE VOLUME (RVOL) - Institutional Buying Footprint
+        # Is volume 2x higher than the last 20 bars?
+        df['vol_ma'] = df.groupby(level=0)['volume'].transform(lambda x: x.rolling(20).mean())
+        df['rvol'] = df['volume'] / df['vol_ma']
         
-        # 3. Volatility (ATR)
-        def get_atr(group):
-            tr = pd.concat([
-                group['high'] - group['low'], 
-                np.abs(group['high'] - group['close'].shift()), 
-                np.abs(group['low'] - group['close'].shift())
-            ], axis=1).max(axis=1)
+        # D. VOLATILITY (ATR)
+        def get_atr(g):
+            tr = pd.concat([g['high']-g['low'], abs(g['high']-g['close'].shift()), abs(g['low']-g['close'].shift())], axis=1).max(axis=1)
             return tr.rolling(14).mean()
-        
         df['atr'] = df.groupby(level=0, group_keys=False).apply(get_atr)
-        
-        # 4. SIGNAL FRAMEWORK
+
+        # --- THE GOATED SIGNAL FRAMEWORK ---
         df['signal'] = 0
-        df.loc[(df['close'] > df['vwap']) & (df['ema_f'] > df['ema_s']), 'signal'] = 1  # Long
-        df.loc[(df['close'] < df['vwap']) & (df['ema_f'] < df['ema_s']), 'signal'] = -1 # Short
+        # LONG: Price > VWAP AND 9 > 21 > 50 AND high RVOL
+        long_cond = (df['close'] > df['vwap']) & (df['ema_9'] > df['ema_21']) & (df['ema_21'] > df['ema_50']) & (df['rvol'] > 1.2)
+        # SHORT: Price < VWAP AND 9 < 21 < 50 AND high RVOL
+        short_cond = (df['close'] < df['vwap']) & (df['ema_9'] < df['ema_21']) & (df['ema_21'] < df['ema_50']) & (df['rvol'] > 1.2)
+        
+        df.loc[long_cond, 'signal'] = 1
+        df.loc[short_cond, 'signal'] = -1
         
         return df
 
-# --- 3. UI DASHBOARD & METRICS ---
+# --- 3. UI & ACCOUNT ---
 acc = trading_client.get_account()
-st.title("🏛️ APEX Institutional Command Center")
+st.title("🦈 APEX PREDATOR: Institutional Intraday")
 
-# Fast Action Header
-h1, h2, h3, h4 = st.columns([1,1,1,1.5])
-h1.metric("Buying Power", f"${float(acc.buying_power):,.2f}")
-h2.metric("Portfolio Value", f"${float(acc.portfolio_value):,.2f}")
+h1, h2, h3, h4 = st.columns(4)
+h1.metric("Equity", f"${float(acc.equity):,.2f}")
+h2.metric("Buying Power", f"${float(acc.buying_power):,.2f}")
 h3.metric("Daily P/L", f"${float(acc.equity) - float(acc.last_equity):,.2f}")
 
 with h4:
-    st.write("") # Alignment
-    if st.button("🚨 EMERGENCY: LIQUIDATE ALL POSITIONS", use_container_width=True, type="primary"):
+    if st.button("🚨 PANIC: LIQUIDATE EVERYTHING", type="primary", use_container_width=True):
         trading_client.close_all_positions(cancel_orders=True)
-        st.toast("SIGNAL SENT: ALL POSITIONS CLOSED")
+        st.toast("TERMINATING ALL EXPOSURE...")
 
-# Sidebar Configuration
-st.sidebar.header("🕹️ Bot Configuration")
-bot_active = st.sidebar.toggle("⚡ ACTIVATE AUTONOMOUS BOT", value=False)
-ext_hours = st.sidebar.toggle("🕙 Extended Hours Support", value=True)
+# --- 4. BOT CONFIG ---
+st.sidebar.header("🤖 Bot Settings")
+bot_active = st.sidebar.toggle("RUN AUTONOMOUS ENGINE", value=False)
+risk_per_trade = st.sidebar.slider("Risk Per Trade (%)", 0.1, 5.0, 1.0)
+watchlist = st.sidebar.multiselect("Watchlist", ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "META", "QQQ", "SPY", "COIN", "PLTR"], default=["NVDA", "TSLA", "AMD", "AAPL"])
 
-# Support for 40+ symbols
-default_symbols = ["AAPL", "TSLA", "NVDA", "AMD", "MSFT", "AMZN", "META", "GOOGL", "NFLX", "QQQ", "SPY", "COIN", "PLTR", "SNOW", "SQ", "PYPL", "BA", "DIS", "V", "JPM", "GS", "WMT", "COST"]
-watchlist = st.sidebar.multiselect("Active Monitor", default_symbols, default=default_symbols[:15])
-
-# Execution Tabs
-tab_mon, tab_exec = st.tabs(["📡 Live Alpha Feed", "⌨️ Manual Execution Terminal"])
-
-with tab_mon:
-    if watchlist:
-        # High-Speed Batch Fetch
+# --- 5. EXECUTION ENGINE (The fix for your 403 error) ---
+if watchlist:
+    try:
+        # Fetch Data
         start_dt = datetime.now() - timedelta(hours=24)
-        try:
-            req = StockBarsRequest(symbol_or_symbols=watchlist, timeframe=TimeFrame.Minute, start=start_dt)
-            raw_df = data_client.get_stock_bars(req).df
-            
-            # Process Batch
-            processed_df = AlphaEngine.analyze_batch(raw_df)
-            # Take the last row for each symbol
-            latest = processed_df.groupby(level=0).tail(1).reset_index()
-            
-            # Formatted Intelligence Table
-            display = latest[['symbol', 'close', 'vwap', 'signal', 'atr']].copy()
-            
-            def get_reasoning(row):
-                if row['signal'] == 1: return "🔥 BULLISH: Price > VWAP & Trend UP"
-                if row['signal'] == -1: return "🩸 BEARISH: Price < VWAP & Trend DOWN"
-                return "⚪ NEUTRAL: Waiting for Confluence"
-            
-            display['Engine Thought'] = display.apply(get_reasoning, axis=1)
-            
-            # The "Boss" Table
-            st.dataframe(
-                display.style.background_gradient(subset=['signal'], cmap='RdYlGn'),
-                use_container_width=True, height=500
-            )
+        raw_df = data_client.get_stock_bars(StockBarsRequest(symbol_or_symbols=watchlist, timeframe=TimeFrame.Minute, start=start_dt)).df
+        
+        # Analyze
+        processed = AlphaEngine.analyze(raw_df)
+        latest = processed.groupby(level=0).tail(1).reset_index()
+        
+        st.subheader("Market Intelligence")
+        st.dataframe(latest[['symbol', 'close', 'vwap', 'rvol', 'signal']].style.background_gradient(subset=['signal'], cmap='RdYlGn'), use_container_width=True)
 
-            # --- AUTONOMOUS EXECUTION LOGIC ---
-            if bot_active:
-                for _, row in display.iterrows():
-                    sym, sig, price, atr = row['symbol'], row['signal'], row['close'], row['atr']
+        if bot_active:
+            # 1. Get ALL open orders to prevent "insufficient qty" (Conflict Resolution)
+            open_orders = trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+            pending_symbols = [o.symbol for o in open_orders]
+
+            for _, row in latest.iterrows():
+                sym, sig, price, atr = row['symbol'], row['signal'], row['close'], row['atr']
+                
+                # SKIP if there's already a pending order for this stock
+                if sym in pending_symbols:
+                    continue 
+
+                try:
+                    pos = trading_client.get_open_position(sym)
+                    current_side = 1 if int(pos.qty) > 0 else -1
+                except:
+                    current_side = 0
+
+                if sig != current_side:
+                    # CLOSE existing
+                    if current_side != 0:
+                        trading_client.close_position(sym)
+                        st.toast(f"Closing {sym}")
                     
-                    try:
-                        pos = trading_client.get_open_position(sym)
-                        current_side = 1 if int(pos.qty) > 0 else -1
-                    except:
-                        current_side = 0
-
-                    if sig != current_side:
-                        # 1. Flip position or close
-                        if current_side != 0: 
-                            trading_client.close_position(sym)
+                    # OPEN new if signal is strong
+                    if sig != 0:
+                        risk_usd = float(acc.equity) * (risk_per_trade / 100)
+                        # Sizing: Risk Amount / ATR Stop distance
+                        qty = int(risk_usd / max(atr, price * 0.01))
                         
-                        # 2. Enter new position
-                        if sig != 0:
-                            # Volatility Adjusted Sizing (Risk 1% of Equity)
-                            risk_usd = float(acc.equity) * 0.01
-                            # Minimum stop distance is 0.5% or ATR
-                            stop_dist = max(atr, price * 0.005)
-                            qty = int(risk_usd / stop_dist)
-                            
-                            if qty > 0:
-                                trading_client.submit_order(MarketOrderRequest(
-                                    symbol=sym, qty=qty, 
-                                    side=OrderSide.BUY if sig == 1 else OrderSide.SELL,
-                                    time_in_force=TimeInForce.GTC, extended_hours=ext_hours
-                                ))
-                                st.toast(f"EXECUTED: {sym} {'Long' if sig==1 else 'Short'}")
+                        if qty > 0:
+                            trading_client.submit_order(MarketOrderRequest(
+                                symbol=sym, qty=qty, 
+                                side=OrderSide.BUY if sig == 1 else OrderSide.SELL,
+                                time_in_force=TimeInForce.GTC, extended_hours=True
+                            ))
+                            st.toast(f"OPENING {sym} {'LONG' if sig==1 else 'SHORT'}")
+    except Exception as e:
+        st.error(f"Engine Sync Error: {e}")
 
-        except Exception as e:
-            st.error(f"Critical System Sync Error: {e}")
-
-with tab_exec:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Manual Market Override")
-        msym = st.text_input("Symbol", "NVDA")
-        mqty = st.number_input("Shares", 1, 10000, 10)
-        maction = st.selectbox("Action", ["BUY", "SELL"])
-        if st.button("SEND COMMAND", use_container_width=True):
-            trading_client.submit_order(MarketOrderRequest(
-                symbol=msym, qty=mqty, side=OrderSide.BUY if maction=="BUY" else OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, extended_hours=ext_hours
-            ))
-            st.success(f"Manual {maction} for {msym} complete.")
-
-    with c2:
-        st.subheader("Active Exposure")
-        curr_pos = trading_client.get_all_positions()
-        if curr_pos:
-            st.dataframe(pd.DataFrame([{
-                'Symbol': p.symbol, 'Qty': p.qty, 'Entry': p.avg_entry_price, 
-                'Price': p.current_price, 'Unrealized P/L %': f"{(float(p.unrealized_plpc)*100):.2f}%"
-            } for p in curr_pos]), use_container_width=True)
-        else:
-            st.info("No active exposure.")
+st.divider()
+st.subheader("Current Positions")
+try:
+    positions = trading_client.get_all_positions()
+    if positions:
+        st.dataframe(pd.DataFrame([{
+            'Symbol': p.symbol, 'Side': p.side, 'Qty': p.qty, 'P/L %': f"{(float(p.unrealized_plpc)*100):.2f}%"
+        } for p in positions]), use_container_width=True)
+    else:
+        st.info("No active trades.")
+except:
+    pass

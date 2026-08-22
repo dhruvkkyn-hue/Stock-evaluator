@@ -6,4 +6,4 @@ plotly
 scipy
 matplotlib
 streamlit
-streamlit-autorefresh
+python-dotenv

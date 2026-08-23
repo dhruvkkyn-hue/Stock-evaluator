@@ -4,9 +4,9 @@ import numpy as np
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from collections import deque
+from streamlit_autorefresh import st_autorefresh
 
-# Alpaca Imports
+# Alpaca SDK
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -14,186 +14,192 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
-# --- 1. GLOBAL SCOPING & SECRETS ---
-try:
-    API_KEY = st.secrets["ALPACA_KEY"]
-    API_SECRET = st.secrets["ALPACA_SECRET"]
-    IS_PAPER = st.secrets.get("IS_PAPER", True)
-except Exception as e:
-    st.error("Secrets not found. Add ALPACA_KEY and ALPACA_SECRET to Streamlit Secrets.")
-    st.stop()
+# --- 1. THE CONNECTION & SECRETS MANAGER ---
+st.set_page_config(page_title="Apex Predator v5", layout="wide", page_icon="🏦")
 
-# Persistent Global State (Survives UI refreshes)
-if 'engine' not in st.session_state:
-    st.session_state.engine = None
-if 'logs' not in st.session_state:
-    st.session_state.logs = deque(maxlen=30)
-if 'metrics' not in st.session_state:
-    st.session_state.metrics = {"equity": 0, "pnl": 0, "status": "OFFLINE"}
+# Global variables for the bot to use outside of the UI thread
+global_bot_logs = []
+global_last_check = "Never"
 
-def log(msg):
-    t = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    st.session_state.logs.appendleft(f"[{t}] {msg}")
+def get_keys():
+    try:
+        return st.secrets["ALPACA_KEY"], st.secrets["ALPACA_SECRET"]
+    except:
+        st.error("🔑 KEYS MISSING: Add 'ALPACA_KEY' and 'ALPACA_SECRET' to your Streamlit Secrets.")
+        st.stop()
 
-# --- 2. THE HIGH-SPEED EXECUTION WORKER ---
-class ApexWorker:
+API_KEY, API_SECRET = get_keys()
+
+# --- 2. THE PERSISTENT BOT SERVICE ---
+class UnifiedBot:
     def __init__(self, symbols):
         self.symbols = symbols
-        self.t_client = TradingClient(API_KEY, API_SECRET, paper=IS_PAPER)
-        self.d_client = StockHistoricalDataClient(API_KEY, API_SECRET)
-        self.active = False
-        self.last_processed_min = {s: None for s in symbols}
+        self.trading_client = TradingClient(API_KEY, API_SECRET, paper=True)
+        self.data_client = StockHistoricalDataClient(API_KEY, API_SECRET)
+        self.is_active = False
+        self.last_ts = {s: None for s in symbols}
+        self.equity_cache = 0.0
+        self.pnl_cache = 0.0
 
-    def start(self):
-        self.active = True
-        self.thread = threading.Thread(target=self._main_loop, daemon=True)
-        self.thread.start()
+    def log(self, msg):
+        global global_bot_logs
+        ts = datetime.now().strftime("%H:%M:%S")
+        global_bot_logs.append(f"[{ts}] {msg}")
+        if len(global_bot_logs) > 50: global_bot_logs.pop(0)
 
-    def stop(self):
-        self.active = False
-
-    def _main_loop(self):
-        while self.active:
+    def start_loop(self):
+        self.is_active = True
+        self.log("🚀 ENGINE START: High-Frequency Monitoring Engaged")
+        while self.is_active:
             try:
-                # A. RECONCILE ACCOUNT (Fastest possible sync)
-                acc = self.t_client.get_account()
-                st.session_state.metrics.update({
-                    "equity": float(acc.equity),
-                    "pnl": float(acc.equity) - float(acc.last_equity),
-                    "status": "ACTIVE"
-                })
+                global global_last_check
+                global_last_check = datetime.now().strftime("%H:%M:%S")
+                
+                # 1. Broker Sync (Proof of connection)
+                acc = self.trading_client.get_account()
+                self.equity_cache = float(acc.equity)
+                self.pnl_cache = float(acc.equity) - float(acc.last_equity)
 
-                # B. BATCH FETCH (The only way to hit "millisecond" feel)
-                # Pull 100 bars (warmup) for all symbols in one call
-                now = datetime.now(timezone.utc)
-                req = StockBarsRequest(
-                    symbol_or_symbols=self.symbols,
-                    timeframe=TimeFrame.Minute,
-                    start=now - timedelta(hours=2)
-                )
-                bars_df = self.d_client.get_stock_bars(req).df
-
+                # 2. Market Data Scan
+                start_dt = datetime.now(timezone.utc) - timedelta(hours=3)
+                req = StockBarsRequest(symbol_or_symbols=self.symbols, timeframe=TimeFrame.Minute, start=start_dt)
+                bars = self.data_client.get_stock_bars(req).df
+                
                 for symbol in self.symbols:
-                    symbol_df = bars_df.xs(symbol)
+                    df = bars.xs(symbol).iloc[:-1] # Only completed bars
+                    latest_ts = df.index[-1]
                     
-                    # C. BAR COMPLETION GUARD (Audit Item #3)
-                    # We only trade on the bar that JUST closed
-                    completed_bars = symbol_df.iloc[:-1]
-                    latest_bar = completed_bars.iloc[-1]
-                    latest_ts = completed_bars.index[-1]
-
-                    # IDEMPOTENCY: Don't process the same minute twice
-                    if self.last_processed_min[symbol] == latest_ts:
-                        continue
+                    if self.last_ts[symbol] == latest_ts: continue # Already processed
                     
-                    # D. ALPHA STRATEGY (Simplified for High Performance)
-                    # Institutional VWAP + EMA Confluence
-                    df = completed_bars.copy()
+                    # 3. Decision Logic (Juiced Up)
                     df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
                     df['ema_9'] = df['close'].ewm(span=9).mean()
                     
-                    price = latest_bar['close']
+                    price = df['close'].iloc[-1]
                     vwap = df['vwap'].iloc[-1]
                     ema = df['ema_9'].iloc[-1]
-
+                    
+                    # Confluence Signal
                     signal = 0
                     if price > vwap and price > ema: signal = 1
                     elif price < vwap and price < ema: signal = -1
-
-                    # E. ORDER MACHINE
-                    self._execute_logic(symbol, signal, price)
-                    self.last_processed_min[symbol] = latest_ts
-
+                    
+                    # 4. Order Execution
+                    self.execute_trade(symbol, signal, price)
+                    self.last_ts[symbol] = latest_ts
+                
             except Exception as e:
-                pass # Silent fail to maintain loop speed, logs handled by UI
+                self.log(f"⚠️ API ERROR: {str(e)}")
+            
+            time.sleep(5) # Fast 5-second market heartbeat
 
-            time.sleep(0.5) # 500ms heartbeat - Fastest safe Alpaca poll rate
-
-    def _execute_logic(self, symbol, signal, price):
-        # 1. Check for current position
+    def execute_trade(self, symbol, signal, price):
         try:
-            pos = self.t_client.get_open_position(symbol)
-            current_side = 1 if int(pos.qty) > 0 else -1
-        except:
-            current_side = 0
+            # Check Position
+            try:
+                pos = self.trading_client.get_open_position(symbol)
+                current_side = 1 if int(pos.qty) > 0 else -1
+            except:
+                current_side = 0
 
-        # 2. Check for pending orders (Conflict Resolution)
-        orders = self.t_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-        if any(o.symbol == symbol for o in orders):
-            return
+            if signal != current_side:
+                # Resolve conflicts (Pending orders)
+                orders = self.trading_client.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
+                if any(o.symbol == symbol for o in orders): return
 
-        if signal != current_side:
-            if current_side != 0:
-                self.t_client.close_position(symbol)
-                log(f"CLOSED {symbol}")
+                if current_side != 0:
+                    self.trading_client.close_position(symbol)
+                    self.log(f"📉 LIQUIDATED {symbol} at ${price}")
 
-            if signal != 0:
-                # 1% Risk Sizing
-                equity = st.session_state.metrics["equity"]
-                qty = max(1, int((equity * 0.01) / price))
-                self.t_client.submit_order(MarketOrderRequest(
-                    symbol=symbol, qty=qty, 
-                    side=OrderSide.BUY if signal == 1 else OrderSide.SELL,
-                    time_in_force=TimeInForce.GTC, extended_hours=True
-                ))
-                log(f"OPENED {symbol} {'LONG' if signal == 1 else 'SHORT'} @ {price}")
+                if signal != 0:
+                    qty = max(1, int((self.equity_cache * 0.02) / price)) # 2% allocation
+                    self.trading_client.submit_order(MarketOrderRequest(
+                        symbol=symbol, qty=qty, 
+                        side=OrderSide.BUY if signal == 1 else OrderSide.SELL,
+                        time_in_force=TimeInForce.GTC, extended_hours=True
+                    ))
+                    self.log(f"🔥 ENTERED {'LONG' if signal == 1 else 'SHORT'} {symbol} ({qty} shs) @ ${price}")
+        except Exception as e:
+            self.log(f"❌ TRADE FAILED: {str(e)}")
 
-# --- 3. STREAMLIT UI (The Dashboard) ---
-st.set_page_config(page_title="Apex Predator v4", layout="wide")
+# --- 3. THE UI DASHBOARD ---
+st_autorefresh(interval=5000, key="ui_heartbeat")
 
-# Sidebar
-st.sidebar.title("🦈 System Controls")
-if st.sidebar.button("🚀 BOOT ENGINE"):
-    if not st.session_state.engine:
-        st.session_state.engine = ApexWorker(["AAPL", "NVDA", "TSLA", "AMD", "MSFT"])
-        st.session_state.engine.start()
-        log("System Booted. Millisecond Loop Engaged.")
+if 'bot_instance' not in st.session_state:
+    st.session_state.bot_instance = UnifiedBot(["AAPL", "NVDA", "TSLA", "AMD", "MSFT"])
 
-if st.sidebar.button("🛑 KILL ENGINE"):
-    if st.session_state.engine:
-        st.session_state.engine.stop()
-        st.session_state.engine = None
-        st.session_state.metrics["status"] = "OFFLINE"
-        log("System Shutdown.")
+bot = st.session_state.bot_instance
 
-# Dashboard
-c1, c2, c3 = st.columns(3)
-c1.metric("Live Equity", f"${st.session_state.metrics['equity']:,.2f}")
-c2.metric("Intraday P/L", f"${st.session_state.metrics['pnl']:,.2f}")
-c3.metric("Engine Health", st.session_state.metrics['status'])
+# Header
+st.title("🏛️ APEX PREDATOR v5: Institutional Control")
+st.write(f"**Bot Status:** {'🟢 ACTIVE' if bot.is_active else '🔴 OFFLINE'} | **Last Sync:** {global_last_check}")
 
-st.divider()
+# Metrics Row
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Live Equity", f"${bot.equity_cache:,.2f}")
+c2.metric("Intraday P/L", f"${bot.pnl_cache:,.2f}")
 
-col_left, col_right = st.columns([2, 1])
+try:
+    pos_list = bot.trading_client.get_all_positions()
+    c3.metric("Open Positions", len(pos_list))
+except:
+    c3.metric("Open Positions", 0)
 
-with col_left:
-    st.subheader("📡 Real-Time Execution Audit")
-    # Display logs with custom styling
-    for l in list(st.session_state.logs):
-        if "OPENED" in l: st.success(l)
-        elif "CLOSED" in l: st.error(l)
-        else: st.text(l)
+# Sidebar Controls
+st.sidebar.header("🕹️ Bot Controls")
+if st.sidebar.button("🚀 BOOT ENGINE", use_container_width=True):
+    if not bot.is_active:
+        threading.Thread(target=bot.start_loop, daemon=True).start()
+        st.toast("Engine Online.")
 
-with col_right:
-    st.subheader("Manual Market Override")
-    m_sym = st.text_input("Symbol")
-    m_qty = st.number_input("Shares", 1, 100, 1)
-    col_a, col_b = st.columns(2)
-    if col_a.button("BUY"):
-        trading_client = TradingClient(API_KEY, API_SECRET, paper=IS_PAPER)
-        trading_client.submit_order(MarketOrderRequest(symbol=m_sym, qty=m_qty, side=OrderSide.BUY, time_in_force=TimeInForce.GTC))
-        log(f"MANUAL BUY: {m_sym}")
-    if col_b.button("SELL"):
-        trading_client = TradingClient(API_KEY, API_SECRET, paper=IS_PAPER)
-        trading_client.submit_order(MarketOrderRequest(symbol=m_sym, qty=m_qty, side=OrderSide.SELL, time_in_force=TimeInForce.GTC))
-        log(f"MANUAL SELL: {m_sym}")
+if st.sidebar.button("🛑 KILL ENGINE", use_container_width=True):
+    bot.is_active = False
+    st.toast("Engine Offline.")
 
-# Final Panic
-if st.button("🚨 PANIC: LIQUIDATE PORTFOLIO", type="primary", use_container_width=True):
-    t_client = TradingClient(API_KEY, API_SECRET, paper=IS_PAPER)
-    t_client.close_all_positions(cancel_orders=True)
-    log("EMERGENCY LIQUIDATION TRIGGERED.")
+if st.sidebar.button("🚨 PANIC: LIQUIDATE", type="primary", use_container_width=True):
+    bot.trading_client.close_all_positions(cancel_orders=True)
+    bot.log("EMERGENCY: ALL POSITIONS FLATTENED.")
 
-# This keeps the UI refreshing so you can see the millisecond logs
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=2000, key="ui_refresh")
+# --- 4. REAL-TIME DATA DISPLAYS ---
+tab_trades, tab_positions, tab_diagnostics = st.tabs(["📜 Live Trade Ledger", "💼 Active Portfolio", "🔍 Connection Diagnostics"])
+
+with tab_trades:
+    st.subheader("High-Frequency Audit Log")
+    if not global_bot_logs:
+        st.info("Waiting for first trade signal...")
+    else:
+        for msg in reversed(global_bot_logs):
+            if "ENTERED" in msg: st.success(msg)
+            elif "LIQUIDATED" in msg: st.error(msg)
+            else: st.text(msg)
+
+with tab_positions:
+    st.subheader("Broker-Synchronized Positions")
+    try:
+        pos_data = []
+        for p in pos_list:
+            pos_data.append({
+                "Symbol": p.symbol,
+                "Side": p.side.upper(),
+                "Qty": p.qty,
+                "Market Value": f"${float(p.market_value):,.2f}",
+                "Profit/Loss": f"{float(p.unrealized_intraday_plpc)*100:.2f}%"
+            })
+        if pos_data:
+            st.table(pos_data)
+        else:
+            st.info("No active trades currently.")
+    except Exception as e:
+        st.warning("Could not sync positions yet.")
+
+with tab_diagnostics:
+    st.subheader("API Connection Health")
+    try:
+        acc_raw = bot.trading_client.get_account()
+        st.write("**Account Number:**", acc_raw.account_number)
+        st.write("**Currency:**", acc_raw.currency)
+        st.write("**Status:**", acc_raw.status)
+        st.write("**Buying Power:**", f"${float(acc_raw.buying_power):,.2f}")
+        st.success("✅ CONNECTION ESTABLISHED: Alpaca API is responding perfectly.")
+    except Exception as e:
+        st.error(f"❌ CONNECTION FAILED: {str(e)}")

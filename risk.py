@@ -1,15 +1,17 @@
 class RiskManager:
-    def __init__(self, max_tick_risk=0.02, max_portfolio_exposure=0.80):
-        self.max_tick_risk = max_tick_risk
-        self.max_exposure = max_portfolio_exposure
+    def __init__(self, max_risk_per_trade=0.02):
+        self.max_risk = max_risk_per_trade
 
-    def calculate_qty(self, price, equity):
-        # Never risk more than 2% of equity on one trade
-        risk_amount = equity * self.max_tick_risk
-        qty = int(risk_amount / price)
+    def calculate_position_size(self, equity, price):
+        """Fixed-fractional position sizing."""
+        if price <= 0: return 0
+        dollar_to_invest = equity * self.max_risk
+        qty = int(dollar_to_invest / price)
         return max(qty, 1)
 
-    def can_trade(self, current_exposure_pct):
-        if current_exposure_pct > self.max_exposure:
-            return False, "Max portfolio exposure reached."
-        return True, "OK"
+    def validate_execution(self, symbol, side, qty, current_positions):
+        """Prevents duplicate entries for the same symbol."""
+        for p in current_positions:
+            if p.symbol == symbol:
+                return False, "Already in position"
+        return True, "Safe to execute"

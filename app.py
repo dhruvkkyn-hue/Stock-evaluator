@@ -1,37 +1,24 @@
 import streamlit as st
-import threading
 from engine import TradingEngine
 
-st.set_page_config(layout="wide", page_title="Institutional Trading Platform")
+# 1. Setup Secrets
+try:
+    API_KEY = st.secrets["ALPACA_KEY"]
+    API_SECRET = st.secrets["ALPACA_SECRET"]
+except Exception as e:
+    st.error("Missing Alpaca Keys in Secrets!")
+    st.stop()
 
-# Use Secrets for API Keys
-API_KEY = st.secrets["ALPACA_KEY"]
-API_SECRET = st.secrets["ALPACA_SECRET"]
-
-if "engine" not in st.session_state:
+# 2. Persistent Global State
+# We check if it's 'None' to avoid the AttributeError you saw
+if 'engine' not in st.session_state or st.session_state.engine is None:
     st.session_state.engine = TradingEngine(API_KEY, API_SECRET, ["AAPL", "NVDA", "TSLA"])
 
 engine = st.session_state.engine
 
-st.title("🏛️ Production Algorithmic Console")
+# 3. Safe UI Check
+st.title("🏛️ Apex Predator v5")
 
-# Dashboard Layout
-col1, col2 = st.columns([1, 3])
-
-with col1:
-    st.header("Controls")
-    if st.button("Start System", use_container_width=True):
-        if not engine.is_running:
-            thread = threading.Thread(target=engine.run_loop, daemon=True)
-            thread.start()
-            st.success("Worker Thread Launched")
-    
-    if st.button("Emergency Stop", type="primary", use_container_width=True):
-        engine.is_running = False
-        st.warning("Worker Stopping...")
-
-with col2:
-    st.header("System Health")
-    # Here you would query File 1 (database.py) to show the heartbeat 
-    # and trade journal instead of using session_state.
-    st.info("System reading from persistent SQLite store...")
+# Check status safely
+is_active = getattr(engine, 'is_running', False)
+st.write(f"Bot Status: {'🟢 ACTIVE' if is_active else '🔴 OFFLINE'}")

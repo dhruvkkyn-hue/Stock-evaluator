@@ -1,8 +1,5 @@
+streamlit
 pandas
 numpy
 alpaca-py
-pyarrow
-plotly
-scipy
-streamlit
-streamlit-autorefresh
+sqlite3

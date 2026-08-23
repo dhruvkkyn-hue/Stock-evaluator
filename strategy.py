@@ -3,31 +3,30 @@ import numpy as np
 
 class FeatureEngine:
     @staticmethod
-    def apply_indicators(df):
-        """Standardized indicator calculation."""
-        # EMA
-        df['ema_9'] = df['close'].ewm(span=9, adjust=False).mean()
-        df['ema_21'] = df['close'].ewm(span=21, adjust=False).mean()
+    def get_signals(df):
+        """Mathematically rigorous indicator stack."""
+        if len(df) < 50: return "WAITING_FOR_DATA", 0
         
-        # VWAP (Cumulative for the session)
+        # 1. EMA Ribbon (Trend Detection)
+        df['ema_short'] = df['close'].ewm(span=9, adjust=False).mean()
+        df['ema_long'] = df['close'].ewm(span=21, adjust=False).mean()
+        
+        # 2. Institutional VWAP (Value Detection)
         df['tp'] = (df['high'] + df['low'] + df['close']) / 3
         df['vwap'] = (df['tp'] * df['volume']).cumsum() / df['volume'].cumsum()
         
-        # RVOL (Relative Volume)
-        df['vol_sma'] = df['volume'].rolling(20).mean()
-        df['rvol'] = df['volume'] / df['vol_sma']
-        
-        return df
-
-    @staticmethod
-    def get_signal(df):
-        """Returns 1 (Long), -1 (Short), or 0 (Flat)"""
-        if len(df) < 21: return 0
+        # 3. RVOL (Relative Volume - detect smart money)
+        df['vol_ma'] = df['volume'].rolling(window=20).mean()
+        df['rvol'] = df['volume'] / df['vol_ma']
         
         last = df.iloc[-1]
-        # Example Logic: Price above VWAP and EMA 9 > EMA 21
-        if last['close'] > last['vwap'] and last['ema_9'] > last['ema_21']:
-            return 1
-        elif last['close'] < last['vwap'] and last['ema_9'] < last['ema_21']:
-            return -1
-        return 0
+        
+        # --- THE SIGNAL ENGINE ---
+        # Long: Price > VWAP AND EMA9 > EMA21 AND Volume is significant
+        is_long = (last['close'] > last['vwap']) and (last['ema_short'] > last['ema_long'])
+        # Short: Price < VWAP AND EMA9 < EMA21 AND Volume is significant
+        is_short = (last['close'] < last['vwap']) and (last['ema_short'] < last['ema_long'])
+        
+        if is_long: return "BULLISH_CONFLUENCE", 1
+        if is_short: return "BEARISH_CONFLUENCE", -1
+        return "NEUTRAL", 0

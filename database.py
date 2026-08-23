@@ -9,17 +9,11 @@ class TradingDB:
 
     def _create_tables(self):
         with sqlite3.connect(self.db_path) as conn:
-            # Persistent state for the worker
-            conn.execute("""CREATE TABLE IF NOT EXISTS system_state 
-                         (key TEXT PRIMARY KEY, value TEXT)""")
-            # Lease to prevent duplicate workers
             conn.execute("""CREATE TABLE IF NOT EXISTS worker_lease 
                          (id INTEGER PRIMARY KEY, worker_id TEXT, heartbeat TIMESTAMP)""")
-            # Audit trail for every single trade
             conn.execute("""CREATE TABLE IF NOT EXISTS trade_journal 
                          (id INTEGER PRIMARY KEY, timestamp TEXT, symbol TEXT, side TEXT, 
                           price REAL, qty REAL, signal_type TEXT, client_order_id TEXT UNIQUE)""")
-            # Bar tracking to prevent double-processing
             conn.execute("""CREATE TABLE IF NOT EXISTS processed_bars 
                          (symbol TEXT, timestamp TEXT, PRIMARY KEY(symbol, timestamp))""")
             

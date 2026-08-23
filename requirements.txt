@@ -2,4 +2,4 @@ streamlit
 pandas
 numpy
 alpaca-py
-sqlite3
+streamlit-autorefresh

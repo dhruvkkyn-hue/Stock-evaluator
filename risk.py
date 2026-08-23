@@ -1,17 +1,17 @@
 class RiskManager:
-    def __init__(self, max_risk_per_trade=0.02):
-        self.max_risk = max_risk_per_trade
+    def __init__(self, risk_per_trade_pct=0.02):
+        self.risk_pct = risk_per_trade_pct
 
-    def calculate_position_size(self, equity, price):
-        """Fixed-fractional position sizing."""
+    def calculate_qty(self, equity, price):
         if price <= 0: return 0
-        dollar_to_invest = equity * self.max_risk
-        qty = int(dollar_to_invest / price)
+        # Calculate quantity based on 2% equity risk
+        target_spend = equity * self.risk_pct
+        qty = int(target_spend / price)
         return max(qty, 1)
 
-    def validate_execution(self, symbol, side, qty, current_positions):
-        """Prevents duplicate entries for the same symbol."""
+    def is_safe_to_trade(self, symbol, current_positions):
+        # Don't enter if already in a position for this symbol
         for p in current_positions:
             if p.symbol == symbol:
-                return False, "Already in position"
-        return True, "Safe to execute"
+                return False
+        return True

@@ -1,5 +1,4 @@
 streamlit
 pandas
-numpy
-alpaca-py
-streamlit-autorefresh
+openpyxl
+plotly

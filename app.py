@@ -144,7 +144,7 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. QUANT ENGINE: SAFE MATH & FINANCIAL SECTOR PARSING
+# 2. QUANT ENGINE: SAFE MATH & ROBUST WORKBOOK EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
 def safe_float(val, default=0.0):
     if val is None or pd.isna(val):
@@ -176,16 +176,21 @@ def calculate_cagr(start_val, end_val, periods):
     except Exception:
         return None
 
-def detect_financial_entity(company_name, sheet_names, all_text_blobs):
+def detect_financial_entity(company_name, sheet_names, extracted_sheets):
     name_lower = str(company_name).lower()
     fin_name_kws = ['bank', 'nbfc', 'finance', 'financial', 'housing finance', 'capital services', 'investments']
     if any(kw in name_lower for kw in fin_name_kws):
         return True
     
-    blob_str = " ".join([str(s).lower() for s in sheet_names] + [str(b).lower() for b in all_text_blobs])
     fin_terms = ['advances', 'deposits', 'nii', 'net interest income', 'interest earned', 'provisions', 'npa']
-    term_hits = sum(1 for term in fin_terms if term in blob_str)
-    return term_hits >= 2
+    hits = 0
+    for sname, df in extracted_sheets.items():
+        if df is not None and not df.empty and df.shape[1] > 0:
+            col0_text = " ".join([str(x).lower() for x in df.iloc[:, 0].dropna().tolist()[:60]])
+            for term in fin_terms:
+                if term in col0_text:
+                    hits += 1
+    return hits >= 2
 
 def get_row_by_keywords(df, keywords):
     if df is None or df.empty:
@@ -210,9 +215,8 @@ def parse_time_series_row(row_series):
 
 def extract_financial_data(wb, filename):
     sheet_names = wb.sheetnames
-    all_text_blobs = []
-    
     extracted_sheets = {}
+    
     for sname in sheet_names:
         sheet = wb[sname]
         data = list(sheet.iter_rows(values_only=True))
@@ -220,27 +224,31 @@ def extract_financial_data(wb, filename):
             df = pd.DataFrame(data)
             df = df.dropna(how='all').reset_index(drop=True)
             extracted_sheets[sname] = df
-            text_sample = " ".join(df.astype(str).values.flatten()[:100])
-            all_text_blobs.append(text_sample)
 
     company_name = filename.replace(".xlsx", "").replace(".xls", "").strip()
     cmp = 0.0
     shares = 0.0
 
+    # Locate Data Sheet or fallback
+    ds_key = next((s for s in sheet_names if "data sheet" in s.lower()), None)
+    if ds_key and ds_key in extracted_sheets:
+        ds_df = extracted_sheets[ds_key]
+        if ds_df.shape[0] >= 1 and ds_df.shape[1] >= 2:
+            extracted_title = str(ds_df.iloc[0, 1]).strip()
+            if extracted_title and extracted_title.lower() != "nan" and extracted_title != "None":
+                company_name = extracted_title
+
+    # Extract CMP and Shares if present in sheet cells
     for sname, df in extracted_sheets.items():
         if df.shape[1] >= 2:
             col0 = df.iloc[:, 0].astype(str).str.lower()
-            if "company" in col0.values:
-                idx = col0[col0 == "company"].index[0]
-                val = str(df.iloc[idx, 1]).strip()
-                if val: company_name = val
             for idx, cell in enumerate(col0):
-                if "current price" in str(cell) or "cmp" in str(cell):
+                if ("current price" in cell or "cmp" in cell) and cmp == 0.0:
                     cmp = safe_float(df.iloc[idx, 1])
-                if "shares" in str(cell) or "no. of shares" in str(cell):
+                if ("shares" in cell or "no. of shares" in cell) and shares == 0.0:
                     shares = safe_float(df.iloc[idx, 1])
 
-    is_fin = detect_financial_entity(company_name, sheet_names, all_text_blobs)
+    is_fin = detect_financial_entity(company_name, sheet_names, extracted_sheets)
 
     pl_df = None
     bs_df = None
@@ -255,12 +263,10 @@ def extract_financial_data(wb, filename):
         elif 'cash' in s_low or 'cfo' in s_low:
             cf_df = extracted_sheets[sname]
 
-    if pl_df is None and "Data Sheet" in extracted_sheets:
-        pl_df = extracted_sheets["Data Sheet"]
-    if bs_df is None and "Data Sheet" in extracted_sheets:
-        bs_df = extracted_sheets["Data Sheet"]
-    if cf_df is None and "Data Sheet" in extracted_sheets:
-        cf_df = extracted_sheets["Data Sheet"]
+    if ds_key and ds_key in extracted_sheets:
+        if pl_df is None: pl_df = extracted_sheets[ds_key]
+        if bs_df is None: bs_df = extracted_sheets[ds_key]
+        if cf_df is None: cf_df = extracted_sheets[ds_key]
 
     sales_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['sales', 'revenue', 'interest earned']))
     ebitda_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['operating profit', 'ebitda', 'financing profit']))
@@ -323,7 +329,16 @@ def extract_financial_data(wb, filename):
     curr_capex = capex_ts[-1] if capex_ts else abs(curr_cfi)
     curr_fcf = curr_cfo - curr_capex
 
-    mcap = (cmp * shares) if (cmp > 0 and shares > 0) else (net_worth * 1.5 if net_worth > 0 else 1000.0)
+    # Market Cap extraction
+    mcap_row = get_row_by_keywords(extracted_sheets.get(ds_key), ['market capitalization', 'market cap'])
+    mcap_from_row = parse_time_series_row(mcap_row)
+    if mcap_from_row:
+        mcap = mcap_from_row[-1]
+    elif cmp > 0 and shares > 0:
+        mcap = cmp * shares
+    else:
+        mcap = net_worth * 1.5 if net_worth > 0 else 1000.0
+
     pe = safe_div(mcap, curr_pat) if curr_pat > 0 else None
     
     opm = safe_div(curr_ebitda, curr_sales) * 100.0 if not is_fin else safe_div(curr_pat, curr_sales) * 100.0
@@ -411,9 +426,7 @@ def extract_financial_data(wb, filename):
         "Z_Zone": z_zone,
         "Sloan_Ratio": sloan_ratio,
         "Sales_CAGR_3Yr": sales_cagr_3yr,
-        "PAT_CAGR_3Yr": pat_cagr_3yr,
-        "Raw_Sales_TS": sales_ts,
-        "Raw_PAT_TS": pat_ts
+        "PAT_CAGR_3Yr": pat_cagr_3yr
     }
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -144,788 +144,728 @@ def inject_custom_css():
     """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. QUANT ENGINE: SAFE MATH & ROBUST WORKBOOK EXTRACTION
+# 2. QUANT ENGINE: SAFE MATH & FINANCIAL SECTOR PARSING
 # ─────────────────────────────────────────────────────────────────────────────
+
 def safe_float(val, default=0.0):
-    if val is None or pd.isna(val):
+    if val is None: 
         return default
     try:
-        if isinstance(val, (int, float)):
+        if isinstance(val, (int, float)): 
             return float(val)
-        clean = re.sub(r'[^\d.-]', '', str(val).strip())
-        return float(clean) if clean and clean != '-' else default
-    except (ValueError, TypeError):
+        s = str(val).replace(',', '').replace('₹', '').replace('Rs.', '').strip()
+        if s.startswith('(') and s.endswith(')'): 
+            s = "-" + s[1:-1]
+        return float(s) if s != '' else default
+    except: 
         return default
 
-def safe_div(numerator, denominator, default=0.0):
+def safe_div(n, d, default=0.0):
     try:
-        num = safe_float(numerator)
-        den = safe_float(denominator)
-        return num / den if den != 0.0 else default
-    except (ZeroDivisionError, TypeError, ValueError):
+        n_f = float(n) if n is not None else 0.0
+        d_f = float(d) if d is not None else 0.0
+        return n_f / d_f if d_f != 0 else default
+    except: 
         return default
 
-def calculate_cagr(start_val, end_val, periods):
+def calculate_cagr(series, years):
+    clean_series = [s for s in series if s is not None]
+    if not clean_series or len(clean_series) < years + 1: 
+        return 0.0
     try:
-        s = safe_float(start_val)
-        e = safe_float(end_val)
-        p = safe_float(periods)
-        if s > 0 and e > 0 and p > 0:
-            return ((e / s) ** (1.0 / p) - 1.0) * 100.0
-        return None
-    except Exception:
-        return None
+        start_val = clean_series[-(years + 1)]
+        end_val = clean_series[-1]
+        if start_val <= 0 or end_val <= 0: 
+            return 0.0
+        return ((end_val / start_val) ** (1 / years) - 1) * 100
+    except: 
+        return 0.0
 
-def detect_financial_entity(company_name, sheet_names, extracted_sheets):
-    name_lower = str(company_name).lower()
-    fin_name_kws = ['bank', 'nbfc', 'finance', 'financial', 'housing finance', 'capital services', 'investments']
-    if any(kw in name_lower for kw in fin_name_kws):
-        return True
-    
-    fin_terms = ['advances', 'deposits', 'nii', 'net interest income', 'interest earned', 'provisions', 'npa']
-    hits = 0
-    for sname, df in extracted_sheets.items():
-        if df is not None and not df.empty and df.shape[1] > 0:
-            col0_text = " ".join([str(x).lower() for x in df.iloc[:, 0].dropna().tolist()[:60]])
-            for term in fin_terms:
-                if term in col0_text:
-                    hits += 1
-    return hits >= 2
-
-def get_row_by_keywords(df, keywords):
-    if df is None or df.empty:
-        return None
-    col0 = df.iloc[:, 0].astype(str).str.strip().str.lower()
-    for kw in keywords:
-        kw_lower = kw.lower()
-        matched = df[col0.str.contains(kw_lower, regex=False, na=False)]
-        if not matched.empty:
-            return matched.iloc[0]
+def find_row_series(ws, keywords):
+    kw_lower = [k.lower() for k in keywords]
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=3):
+        label = f"{str(row[0].value or '')} {str(row[1].value or '')} {str(row[2].value or '')}".lower()
+        if any(k in label for k in kw_lower):
+            row_idx = row[0].row
+            series = []
+            for c in range(2, ws.max_column + 1):
+                val = ws.cell(row=row_idx, column=c).value
+                if val is not None:
+                    series.append(safe_float(val, None))
+            if series:
+                return series
     return None
 
-def parse_time_series_row(row_series):
-    if row_series is None or len(row_series) < 2:
-        return []
-    values = []
-    for val in row_series.iloc[1:]:
-        clean = str(val).strip() if pd.notna(val) else ""
-        if clean != "":
-            values.append(safe_float(clean))
-    return values
-
-def extract_financial_data(wb, filename):
-    sheet_names = wb.sheetnames
-    extracted_sheets = {}
+def detect_financial_entity(ws, filename, extracted_name, raw_data):
+    fin_keywords = [
+        "bank", "nbfc", "advances", "deposits", "interest earned", "interest expended", 
+        "net interest income", "nii", "provisions & contingencies", "gross npa", 
+        "net npa", "capital adequacy", "housing finance", "microfinance"
+    ]
     
-    for sname in sheet_names:
-        sheet = wb[sname]
-        data = list(sheet.iter_rows(values_only=True))
-        if data:
-            df = pd.DataFrame(data)
-            df = df.dropna(how='all').reset_index(drop=True)
-            extracted_sheets[sname] = df
+    ws_text_sample = ""
+    for r in range(1, min(40, ws.max_row + 1)):
+        for c in range(1, min(4, ws.max_column + 1)):
+            val = ws.cell(row=r, column=c).value
+            if val:
+                ws_text_sample += f" {str(val).lower()}"
+                
+    if any(kw in ws_text_sample for kw in fin_keywords):
+        return True
 
-    company_name = filename.replace(".xlsx", "").replace(".xls", "").strip()
-    cmp = 0.0
-    shares = 0.0
+    combined_name = f"{extracted_name} {filename}".lower()
+    name_fin_terms = ["bank", "finance", "fin", "nbfc", "capital", "housing fin", "lending"]
+    if any(term in combined_name for term in name_fin_terms):
+        return True
 
-    # Locate Data Sheet or fallback
-    ds_key = next((s for s in sheet_names if "data sheet" in s.lower()), None)
-    if ds_key and ds_key in extracted_sheets:
-        ds_df = extracted_sheets[ds_key]
-        if ds_df.shape[0] >= 1 and ds_df.shape[1] >= 2:
-            extracted_title = str(ds_df.iloc[0, 1]).strip()
-            if extracted_title and extracted_title.lower() != "nan" and extracted_title != "None":
-                company_name = extracted_title
+    return False
 
-    # Extract CMP and Shares if present in sheet cells
-    for sname, df in extracted_sheets.items():
-        if df.shape[1] >= 2:
-            col0 = df.iloc[:, 0].astype(str).str.lower()
-            for idx, cell in enumerate(col0):
-                if ("current price" in cell or "cmp" in cell) and cmp == 0.0:
-                    cmp = safe_float(df.iloc[idx, 1])
-                if ("shares" in cell or "no. of shares" in cell) and shares == 0.0:
-                    shares = safe_float(df.iloc[idx, 1])
+def process_workbook(file_bytes, filename):
+    try:
+        res = {}
+        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+        ds_name = next((s for s in wb.sheetnames if "data sheet" in s.lower()), wb.sheetnames[0])
+        ws = wb[ds_name]
 
-    is_fin = detect_financial_entity(company_name, sheet_names, extracted_sheets)
+        extracted_name = ws.cell(row=1, column=2).value
+        company_name = str(extracted_name).strip() if extracted_name else str(filename).replace(".xlsx", "").replace(".xls", "")
+        res["Company"] = company_name
 
-    pl_df = None
-    bs_df = None
-    cf_df = None
+        data_map = {
+            "mcap": ["Market Capitalization", "Market Cap"],
+            "sales": ["Sales", "Revenue", "Interest Earned", "Total Revenue", "Gross Revenue"],
+            "op": ["Operating Profit", "EBITDA", "EBIT", "Operating Profit / (Loss)"],
+            "pat": ["Net Profit", "Profit after tax", "PAT"],
+            "pbt": ["Profit before tax", "PBT"],
+            "interest": ["Interest", "Finance Costs"],
+            "depr": ["Depreciation", "Depreciation & Amortization"],
+            "debt": ["Borrowings", "Total Debt", "Debt"],
+            "equity": ["Equity Share Capital", "Share Capital"],
+            "reserves": ["Reserves", "Other Equity"],
+            "cfo": ["Cash from Operating", "CFO", "Cash flow from operating activities"],
+            "cfi": ["Cash from Investing", "CFI", "Cash flow from investing activities"],
+            "capex": ["Capital Expenditure", "Fixed Assets Purchased", "CapEx", "Purchase of fixed assets"],
+            "cwip": ["Capital Work in Progress", "CWIP"],
+            "net_block": ["Net Block", "Fixed Assets", "Property Plant and Equipment"],
+            "liab": ["Other Liabilities", "Total Liabilities", "Current Liabilities"],
+            "assets": ["Total Assets"],
+            "receivables": ["Receivables", "Trade Receivables"],
+            "inventory": ["Inventory", "Inventories"]
+        }
 
-    for sname in sheet_names:
-        s_low = sname.lower()
-        if 'profit' in s_low or 'p&l' in s_low or 'income' in s_low:
-            pl_df = extracted_sheets[sname]
-        elif 'balance' in s_low or 'b&s' in s_low:
-            bs_df = extracted_sheets[sname]
-        elif 'cash' in s_low or 'cfo' in s_low:
-            cf_df = extracted_sheets[sname]
-
-    if ds_key and ds_key in extracted_sheets:
-        if pl_df is None: pl_df = extracted_sheets[ds_key]
-        if bs_df is None: bs_df = extracted_sheets[ds_key]
-        if cf_df is None: cf_df = extracted_sheets[ds_key]
-
-    sales_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['sales', 'revenue', 'interest earned']))
-    ebitda_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['operating profit', 'ebitda', 'financing profit']))
-    pbt_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['profit before tax', 'pbt']))
-    pat_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['net profit', 'pat']))
-    interest_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['interest', 'finance cost']))
-    depr_ts = parse_time_series_row(get_row_by_keywords(pl_df, ['depreciation', 'amortization']))
-
-    eq_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['equity share capital', 'equity capital', 'share capital']))
-    reserves_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['reserves', 'retained earnings']))
-    debt_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['borrowings', 'total debt', 'debt']))
-    assets_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['total assets', 'balance sheet total']))
-    cwip_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['cwip', 'work in progress']))
-    net_block_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['net block', 'fixed assets', 'property plant']))
-    rec_ts = parse_time_series_row(get_row_by_keywords(bs_df, ['trade receivables', 'receivables']))
-
-    cfo_ts = parse_time_series_row(get_row_by_keywords(cf_df, ['cash from operating activity', 'operating activity', 'cfo']))
-    cfi_ts = parse_time_series_row(get_row_by_keywords(cf_df, ['cash from investing activity', 'investing activity', 'cfi']))
-    capex_row = get_row_by_keywords(cf_df, ['fixed assets purchased', 'capital expenditure', 'capex'])
-    capex_ts = [abs(x) for x in parse_time_series_row(capex_row)] if capex_row is not None else []
-
-    curr_sales = sales_ts[-1] if sales_ts else 0.0
-    prev_sales = sales_ts[-2] if len(sales_ts) >= 2 else curr_sales
-    s3_sales = sales_ts[-4] if len(sales_ts) >= 4 else (sales_ts[0] if sales_ts else 0.0)
-
-    curr_pat = pat_ts[-1] if pat_ts else 0.0
-    prev_pat = pat_ts[-2] if len(pat_ts) >= 2 else curr_pat
-    s3_pat = pat_ts[-4] if len(pat_ts) >= 4 else (pat_ts[0] if pat_ts else 0.0)
-
-    curr_pbt = pbt_ts[-1] if pbt_ts else 0.0
-    curr_int = interest_ts[-1] if interest_ts else 0.0
-    curr_depr = depr_ts[-1] if depr_ts else 0.0
-    curr_ebitda = ebitda_ts[-1] if ebitda_ts else (curr_pbt + curr_int + curr_depr)
-    
-    if is_fin:
-        curr_ebit = curr_pbt if curr_pbt != 0.0 else curr_pat
-    else:
-        curr_ebit = curr_pbt + curr_int
-
-    curr_eq = eq_ts[-1] if eq_ts else 0.0
-    curr_res = reserves_ts[-1] if reserves_ts else 0.0
-    net_worth = curr_eq + curr_res
-    prev_nw = (eq_ts[-2] + reserves_ts[-2]) if len(eq_ts) >= 2 and len(reserves_ts) >= 2 else net_worth
-    
-    curr_debt = debt_ts[-1] if debt_ts else 0.0
-    prev_debt = debt_ts[-2] if len(debt_ts) >= 2 else curr_debt
-    
-    curr_assets = assets_ts[-1] if assets_ts else (net_worth + curr_debt)
-    prev_assets = assets_ts[-2] if len(assets_ts) >= 2 else curr_assets
-    if curr_assets == 0.0:
-        curr_assets = 1.0
-
-    curr_cwip = cwip_ts[-1] if cwip_ts else 0.0
-    curr_nb = net_block_ts[-1] if net_block_ts else 0.0
-    curr_rec = rec_ts[-1] if rec_ts else 0.0
-    prev_rec = rec_ts[-2] if len(rec_ts) >= 2 else curr_rec
-
-    curr_cfo = cfo_ts[-1] if cfo_ts else 0.0
-    curr_cfi = cfi_ts[-1] if cfi_ts else 0.0
-    curr_capex = capex_ts[-1] if capex_ts else abs(curr_cfi)
-    curr_fcf = curr_cfo - curr_capex
-
-    # Market Cap extraction
-    mcap_row = get_row_by_keywords(extracted_sheets.get(ds_key), ['market capitalization', 'market cap'])
-    mcap_from_row = parse_time_series_row(mcap_row)
-    if mcap_from_row:
-        mcap = mcap_from_row[-1]
-    elif cmp > 0 and shares > 0:
-        mcap = cmp * shares
-    else:
-        mcap = net_worth * 1.5 if net_worth > 0 else 1000.0
-
-    pe = safe_div(mcap, curr_pat) if curr_pat > 0 else None
-    
-    opm = safe_div(curr_ebitda, curr_sales) * 100.0 if not is_fin else safe_div(curr_pat, curr_sales) * 100.0
-    net_margin = safe_div(curr_pat, curr_sales) * 100.0
-    
-    roe = safe_div(curr_pat, net_worth) * 100.0
-    cap_employed = net_worth + curr_debt
-    roce = safe_div(curr_ebit, cap_employed) * 100.0
-    
-    if curr_int > 0:
-        int_coverage = safe_div(curr_ebit, curr_int)
-    else:
-        int_coverage = 999.0 if curr_debt == 0 else safe_div(curr_ebit, 1.0)
+        raw = {k: find_row_series(ws, v) for k, v in data_map.items()}
+        curr = {k: (raw[k][-1] if raw[k] and raw[k][-1] is not None else 0.0) for k in raw}
         
-    de_ratio = safe_div(curr_debt, net_worth)
-    fcf_yield = safe_div(curr_fcf, mcap) * 100.0
+        is_fin = detect_financial_entity(ws, filename, company_name, raw)
+        res["Is_Financial"] = is_fin
+        res["Sector_Type"] = "Financial / Banking" if is_fin else "Industrial / Commercial"
 
-    p_score = 0
-    if curr_pat > 0: p_score += 1
-    if curr_cfo > 0: p_score += 1
-    roa_curr = safe_div(curr_pat, curr_assets)
-    roa_prev = safe_div(prev_pat, prev_assets)
-    if roa_curr > roa_prev: p_score += 1
-    if curr_cfo > curr_pat: p_score += 1
-    if curr_debt <= prev_debt: p_score += 1
-    if safe_div(curr_pat, curr_sales) > safe_div(prev_pat, prev_sales): p_score += 1
-    if safe_div(curr_sales, curr_assets) >= safe_div(prev_sales, prev_assets): p_score += 1
-    if safe_div(curr_cfo, curr_assets) > 0.05: p_score += 1
-
-    if not is_fin:
-        x1 = 0.2
-        x2 = safe_div(curr_res, curr_assets)
-        x3 = safe_div(curr_ebit, curr_assets)
-        x4 = safe_div(net_worth, curr_debt) if curr_debt > 0 else 5.0
-        x5 = safe_div(curr_sales, curr_assets)
-        altman_z = (1.2 * x1) + (1.4 * x2) + (3.3 * x3) + (0.6 * x4) + (1.0 * x5)
-        if altman_z >= 2.99:
-            z_zone = "Safe"
-        elif altman_z >= 1.81:
-            z_zone = "Grey"
+        local_equity = curr['equity'] + curr['reserves']
+        local_debt = curr['debt']
+        local_assets = curr['assets'] if curr['assets'] > 0 else (local_equity + local_debt + curr['liab'])
+        local_pat = curr['pat']
+        local_pbt = curr['pbt'] if curr['pbt'] != 0 else local_pat
+        local_cfo = curr['cfo']
+        local_sales = curr['sales']
+        local_mcap = curr['mcap']
+        
+        raw_capex = curr['capex']
+        if raw_capex > 0:
+            capex_val = raw_capex
+        elif curr['cfi'] != 0:
+            capex_val = abs(curr['cfi'])
         else:
-            z_zone = "Distress"
-    else:
-        altman_z = None
-        z_zone = "Financial Entity (Exempt)"
+            capex_val = 0.0
 
-    if not is_fin and curr_assets > 0:
-        sloan_ratio = (curr_pat - curr_cfo) / curr_assets
-    else:
-        sloan_ratio = 0.0
+        fcf_val = local_cfo - capex_val
+        res["CapEx"] = capex_val
+        res["FCF"] = fcf_val
+        res["FCF Yield %"] = safe_div(fcf_val, local_mcap) * 100
 
-    sales_cagr_3yr = calculate_cagr(s3_sales, curr_sales, 3)
-    pat_cagr_3yr = calculate_cagr(s3_pat, curr_pat, 3)
+        if is_fin:
+            local_ebit = local_pbt if local_pbt != 0 else local_pat
+            res["Interest Coverage"] = None
+        else:
+            local_ebit = (curr['pbt'] + curr['interest']) if (curr['pbt'] != 0 or curr['interest'] != 0) else curr['op']
+            res["Interest Coverage"] = safe_div(local_ebit, curr['interest'], default=999.0) if curr['interest'] > 0 else 999.0
 
-    return {
-        "Company": company_name,
-        "Filename": filename,
-        "Sector": "Banking & Financial Services" if is_fin else "Industrial & Commercial",
-        "Is_Financial": is_fin,
-        "CMP": cmp,
-        "Market_Cap": mcap,
-        "Sales": curr_sales,
-        "EBITDA": curr_ebitda,
-        "EBIT": curr_ebit,
-        "PAT": curr_pat,
-        "Interest": curr_int,
-        "Net_Worth": net_worth,
-        "Debt": curr_debt,
-        "Total_Assets": curr_assets,
-        "CFO": curr_cfo,
-        "CapEx": curr_capex,
-        "FCF": curr_fcf,
-        "CWIP": curr_cwip,
-        "Net_Block": curr_nb,
-        "PE": pe,
-        "OPM": opm,
-        "Net_Margin": net_margin,
-        "ROE": roe,
-        "ROCE": roce,
-        "Interest_Coverage": int_coverage,
-        "DE_Ratio": de_ratio,
-        "FCF_Yield": fcf_yield,
-        "Piotroski_Score": p_score,
-        "Altman_Z": altman_z,
-        "Z_Zone": z_zone,
-        "Sloan_Ratio": sloan_ratio,
-        "Sales_CAGR_3Yr": sales_cagr_3yr,
-        "PAT_CAGR_3Yr": pat_cagr_3yr
-    }
+        res["Market Cap"] = local_mcap
+        res["Sales"] = local_sales
+        res["Net Profit"] = local_pat
+        res["PE"] = safe_div(local_mcap, local_pat) if local_pat > 0 else -1.0
+        
+        # EV/EBITDA Calculation
+        ev = local_mcap + local_debt
+        ebitda = curr['op'] if curr['op'] > 0 else local_ebit
+        res["EV/EBITDA"] = safe_div(ev, ebitda) if ebitda > 0 else -1.0
+
+        res["D/E"] = safe_div(local_debt, local_equity)
+        
+        if is_fin:
+            res["OPM %"] = safe_div(local_pat, local_sales) * 100
+            res["ROE %"] = safe_div(local_pat, local_equity) * 100
+            res["ROCE %"] = safe_div(local_ebit, local_equity + local_debt) * 100
+        else:
+            res["OPM %"] = safe_div(curr['op'], local_sales) * 100
+            res["ROE %"] = safe_div(local_pat, local_equity) * 100
+            res["ROCE %"] = safe_div(local_ebit, local_equity + local_debt) * 100
+
+        res["CWIP to Net Block %"] = safe_div(curr['cwip'], curr['net_block']) * 100 if curr['net_block'] > 0 else 0.0
+        res["3Yr Sales CAGR %"] = calculate_cagr(raw['sales'], 3)
+        res["3Yr PAT CAGR %"] = calculate_cagr(raw['pat'], 3)
+        
+        if is_fin:
+            res["Sloan %"] = None
+        else:
+            res["Sloan %"] = safe_div(local_pat - local_cfo, local_assets) * 100
+
+        if is_fin:
+            res["Altman Z"] = None
+            res["Zone"] = "N/A (Financial)"
+        else:
+            wc_proxy = (curr['receivables'] + curr['inventory'] + (local_assets * 0.05)) - curr['liab']
+            z_val = (
+                (1.2 * safe_div(wc_proxy, local_assets)) + 
+                (1.4 * safe_div(curr['reserves'], local_assets)) + 
+                (3.3 * safe_div(curr['op'], local_assets)) + 
+                (0.6 * safe_div(local_mcap, local_debt + curr['liab'])) + 
+                (0.99 * safe_div(local_sales, local_assets))
+            )
+            res["Altman Z"] = z_val
+            res["Zone"] = "Safe" if z_val > 2.99 else "Grey" if z_val >= 1.81 else "Distress"
+
+        p_score = 0
+        if local_pat > 0: p_score += 1
+        if local_cfo > 0: p_score += 1
+        if local_cfo > local_pat: p_score += 1
+        if res["3Yr PAT CAGR %"] > 0: p_score += 1
+        
+        if raw['debt'] and len(raw['debt']) > 1 and raw['equity'] and len(raw['equity']) > 1 and raw['reserves'] and len(raw['reserves']) > 1:
+            prev_eq = (raw['equity'][-2] or 0.0) + (raw['reserves'][-2] or 0.0)
+            prev_de = safe_div(raw['debt'][-2], prev_eq)
+            if res["D/E"] <= prev_de: p_score += 1
+            
+        if res["ROCE %"] > 12: p_score += 1
+        if res["3Yr Sales CAGR %"] > 0: p_score += 1
+        if local_assets > 0: p_score += 1
+        res["Piotroski"] = p_score
+
+        return res, file_bytes
+
+    except Exception as e:
+        err_msg = f"Error in {filename}: {str(e)}\n{traceback.format_exc()}"
+        st.error(err_msg)
+        return None, None
+
+def dataframe_to_markdown_table(df_sub):
+    headers = list(df_sub.columns)
+    header_row = "| " + " | ".join(headers) + " |"
+    sep_row = "| " + " | ".join(["---"] * len(headers)) + " |"
+    data_rows = []
+    for _, r in df_sub.iterrows():
+        r_str = [str(val).replace('\n', ' ') for val in r.values]
+        data_rows.append("| " + " | ".join(r_str) + " |")
+    return "\n".join([header_row, sep_row] + data_rows)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. 3-TIER INVESTOR EXPERIENCE NARRATIVE ENGINE
 # ─────────────────────────────────────────────────────────────────────────────
-def generate_strategic_narrative(row, expertise_level):
-    c = row["Company"]
-    roe = row["ROE"]
-    roce = row["ROCE"]
-    de = row["DE_Ratio"]
-    int_cov = row["Interest_Coverage"]
-    fcf = row["FCF"]
-    pat = row["PAT"]
-    fcf_yield = row["FCF_Yield"]
-    pe = row["PE"]
-    f_score = row["Piotroski_Score"]
-    z_score = row["Altman_Z"]
-    z_zone = row["Z_Zone"]
-    sloan = row["Sloan_Ratio"]
+
+def get_metric_meta(metric_name, row):
     is_fin = row["Is_Financial"]
-    cwip = row["CWIP"]
-    nb = row["Net_Block"]
-    sales_cagr = row["Sales_CAGR_3Yr"]
-    pat_cagr = row["PAT_CAGR_3Yr"]
+    meta = {
+        "ROE %": {
+            "val": f"{row['ROE %']:.1f}%",
+            "rating": "good" if row['ROE %'] >= 15 else "warn" if row['ROE %'] >= 10 else "bad",
+            "tag": "Capital Efficiency"
+        },
+        "ROCE %": {
+            "val": f"{row['ROCE %']:.1f}%",
+            "rating": "good" if row['ROCE %'] >= 15 else "warn" if row['ROCE %'] >= 10 else "bad",
+            "tag": "Total Capital Return"
+        },
+        "D/E": {
+            "val": "N/A (Financial)" if is_fin else f"{row['D/E']:.2f}",
+            "rating": "neutral" if is_fin else ("good" if row['D/E'] < 0.5 else "warn" if row['D/E'] <= 1.2 else "bad"),
+            "tag": "Solvency"
+        },
+        "Interest Coverage": {
+            "val": "Exempt (Bank)" if is_fin else (f"{row['Interest Coverage']:.1f}x" if row['Interest Coverage'] < 900 else "Debt Free"),
+            "rating": "neutral" if is_fin else ("good" if row['Interest Coverage'] > 4.0 else "warn" if row['Interest Coverage'] >= 2.0 else "bad"),
+            "tag": "Debt Service"
+        },
+        "FCF": {
+            "val": f"₹{row['FCF']:,.0f} Cr",
+            "rating": "good" if row['FCF'] > 0 else "bad",
+            "tag": "Cash Generation"
+        },
+        "P/E": {
+            "val": f"{row['PE']:.1f}x" if row['PE'] > 0 else "Loss Making",
+            "rating": "neutral" if row['PE'] <= 0 else ("good" if row['PE'] < 25 else "warn" if row['PE'] <= 50 else "bad"),
+            "tag": "Valuation"
+        },
+        "Piotroski": {
+            "val": f"{row['Piotroski']}/8",
+            "rating": "good" if row['Piotroski'] >= 6 else "warn" if row['Piotroski'] >= 4 else "bad",
+            "tag": "Accounting Health"
+        }
+    }
+    return meta.get(metric_name, {"val": "N/A", "rating": "neutral", "tag": "General"})
 
-    buy_points = 0
-    risk_points = 0
-    if roe > 15: buy_points += 2
-    elif roe > 10: buy_points += 1
-    else: risk_points += 1
-
-    if not is_fin:
-        if de < 0.5: buy_points += 2
-        elif de < 1.0: buy_points += 1
-        else: risk_points += 2
-        if int_cov > 4.0: buy_points += 1
-        elif int_cov < 2.0: risk_points += 2
-    else:
-        if roe > 14: buy_points += 2
-
-    if fcf > 0: buy_points += 2
-    else: risk_points += 1
-
-    if f_score >= 6: buy_points += 2
-    elif f_score <= 3: risk_points += 2
-
-    if not is_fin and z_score is not None:
-        if z_score >= 2.99: buy_points += 1
-        elif z_score < 1.81: risk_points += 2
-
-    if buy_points >= 6 and risk_points <= 2:
-        verdict = "STRONG BUY (ACCUMULATE)"
-        verdict_cls = "verdict-strong-buy"
-        verdict_icon = "🟢"
-        verdict_summary = "High-quality compounding candidate exhibiting strong capital efficiency and pristine balance sheet health."
-    elif buy_points >= 4 and risk_points <= 3:
-        verdict = "MODERATE BUY (SELECTIVE ALLOCATION)"
-        verdict_cls = "verdict-moderate-buy"
-        verdict_icon = "🔵"
-        verdict_summary = "Healthy business fundamentals with reasonable safeguards, suitable for core portfolio allocation."
-    elif risk_points >= 4:
-        verdict = "HIGH RISK (AVOID / RE-EVALUATE)"
-        verdict_cls = "verdict-avoid"
-        verdict_icon = "🔴"
-        verdict_summary = "Significant red flags identified across cash flow reality, high leverage, or solvency metrics."
-    else:
-        verdict = "NEUTRAL / HOLD (WATCHLIST)"
-        verdict_cls = "verdict-hold"
-        verdict_icon = "🟡"
-        verdict_summary = "Fair business metrics but lacks decisive margin of safety or standout competitive advantage."
-
-    pe_str = f"{pe:.1f}x" if pe else "Loss-making"
-    fcf_str = f"₹{fcf:,.1f} Cr"
-    sales_cagr_str = f"{sales_cagr:.1f}%" if sales_cagr is not None else "N/A"
-    pat_cagr_str = f"{pat_cagr:.1f}%" if pat_cagr is not None else "N/A"
-
-    st.markdown(f"""
-    <div class="exec-card">
-        <div class="verdict-banner {verdict_cls}">
-            <div>{verdict_icon} VERDICT: {verdict}</div>
-            <div style="font-size: 0.85rem; font-weight: normal; opacity: 0.9;">Mode: {expertise_level}</div>
-        </div>
-        <p style="font-size: 1.05rem; color: #f0f6fc; margin-bottom: 18px; line-height: 1.5;">{verdict_summary}</p>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 16px;">
-            <div class="stat-badge">
-                <div class="stat-label">ROE (Return)</div>
-                <div class="stat-value">{roe:.1f}%</div>
-            </div>
-            <div class="stat-badge">
-                <div class="stat-label">ROCE</div>
-                <div class="stat-value">{roce:.1f}%</div>
-            </div>
-            <div class="stat-badge">
-                <div class="stat-label">P/E Valuation</div>
-                <div class="stat-value">{pe_str}</div>
-            </div>
-            <div class="stat-badge">
-                <div class="stat-label">Piotroski Health</div>
-                <div class="stat-value">{f_score}/8</div>
-            </div>
-            <div class="stat-badge">
-                <div class="stat-label">Free Cash Flow</div>
-                <div class="stat-value">{fcf_str}</div>
-            </div>
-            <div class="stat-badge">
-                <div class="stat-label">Debt-to-Equity</div>
-                <div class="stat-value">{'N/A (Bank)' if is_fin else f'{de:.2f}x'}</div>
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    if "Beginner" in expertise_level:
-        st.markdown(f"### 📖 Plain-English Guide to {c}")
+def get_beginner_metric_desc(metric, row):
+    c = row["Company"]
+    is_fin = row["Is_Financial"]
+    
+    if metric == "ROE %":
+        val = row["ROE %"]
+        status = "🌟 Excellent" if val >= 18 else "✅ Good" if val >= 12 else "⚠️ Subdued"
+        meaning = (
+            f"If shareholders give {c} ₹100 of their own money, the management generates **₹{val:.1f} in annual net profit**. "
+            "High numbers indicate that the company has a competitive advantage (a moat)."
+        )
+        takeaway = "Consistently earning above 15% means your wealth compounds rapidly over time."
         
-        with st.expander("🏢 1. How Profitable is this Business? (Profitability Pillar)", expanded=True):
-            st.markdown(f"""
-            <div class="pillar-header">🎯 Return on Equity: <b>{roe:.1f}%</b></div>
-            <p>Imagine giving this business ₹100 of shareholders' money. Last year, they generated <b>₹{roe:.1f}</b> in pure profit on that money.</p>
-            <div class="explainer-box">
-                <b>💡 Rule of Thumb:</b> Great businesses consistently achieve an ROE above <b>15%</b>. 
-                {f"✅ <b>{c} passes this test!</b> It has outstanding compounding power." if roe >= 15 else f"⚠️ <b>{c} is below 15%.</b> It is earning modest returns on shareholder capital."}
-            </div>
-            """, unsafe_allow_html=True)
-
-        with st.expander("🛡️ 2. Is this Company Safe from Debt? (Debt & Safety Pillar)", expanded=True):
-            if is_fin:
-                st.markdown(f"""
-                <div class="pillar-header">🏦 Financial Institution Safety</div>
-                <p>Because <b>{c}</b> is a bank/NBFC, it naturally takes customer deposits and lends them out. Traditional debt-to-equity ratios don't apply.</p>
-                <div class="explainer-box">
-                    Key indicator: Piotroski Score is <b>{f_score}/8</b>. { "The bank displays robust health across profitability and operational safeguards." if f_score >= 5 else "Caution is warranted regarding loan book stress or slowing returns." }
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="pillar-header">⚖️ Debt-to-Equity: <b>{de:.2f}x</b> | Interest Coverage: <b>{int_cov:.1f}x</b></div>
-                <p>For every ₹1 of its own money, {c} owes <b>₹{de:.2f}</b> to lenders. Furthermore, their operating profit can pay annual interest payments <b>{int_cov:.1f} times over</b>.</p>
-                <div class="explainer-box">
-                    <b>💡 Rule of Thumb:</b> A debt ratio below <b>0.5x</b> is very safe. An interest coverage above <b>3.0x</b> means the company has plenty of breathing room.
-                    <br>{ "✅ <b>Low financial risk:</b> This company is not at risk of debt distress." if de < 0.8 and int_cov > 3.0 else "⚠️ <b>Heavier debt load:</b> Significant cash goes toward servicing debt." }
-                </div>
-                """, unsafe_allow_html=True)
-
-        with st.expander("💵 3. Is the Cash Real? (Cash Flow Pillar)", expanded=True):
-            st.markdown(f"""
-            <div class="pillar-header">💰 Reported Profit: <b>₹{pat:,.1f} Cr</b> | Real Free Cash: <b>₹{fcf:,.1f} Cr</b></div>
-            <p>Accounting profit on paper can be distorted. <b>Free Cash Flow (FCF)</b> is the real money left in the bank after building factories and maintaining equipment.</p>
-            <div class="explainer-box">
-                <b>💡 Rule of Thumb:</b> A healthy business should turn accounting profit into actual cash.
-                <br>{ f"✅ <b>Cash Cow:</b> {c} converted its accounting profit into ₹{fcf:,.1f} Cr of real liquid cash." if fcf > 0 else f"⚠️ <b>Cash Drain:</b> {c} reported paper profits, but actual cash was consumed by heavy capital spending or unpaid customer bills." }
-            </div>
-            """, unsafe_allow_html=True)
-
-        with st.expander("🏷️ 4. Is the Price Right? (Valuation Pillar)", expanded=True):
-            st.markdown(f"""
-            <div class="pillar-header">🏷️ Price-to-Earnings (P/E): <b>{pe_str}</b></div>
-            <p>The P/E ratio tells you how many rupees investors are paying for every ₹1 of annual profit.</p>
-            <div class="explainer-box">
-                <b>💡 Rule of Thumb:</b> In Indian markets, a P/E between 15x–25x is common for mature companies. Above 40x means investors expect massive future growth.
-                <br>{ f"Investigate if growth justified: 3-Year Profit Growth is <b>{pat_cagr_str}</b>." if pat_cagr is not None else "" }
-            </div>
-            """, unsafe_allow_html=True)
-
-    elif "Intermediate" in expertise_level:
-        st.markdown(f"### 📈 Comprehensive Financial Analysis for {c}")
-        col_a, col_b = st.columns(2)
-        
-        with col_a:
-            st.markdown("#### 🎯 Capital Productivity & Growth")
-            st.write(f"- **Return on Capital Employed (ROCE):** `{roce:.1f}%` (Overall business efficiency on debt + equity)")
-            st.write(f"- **Return on Equity (ROE):** `{roe:.1f}%` (Equity compounding speed)")
-            st.write(f"- **Operating Profit Margin (OPM):** `{row['OPM']:.1f}%`")
-            st.write(f"- **3-Yr Sales Growth (CAGR):** `{sales_cagr_str}`")
-            st.write(f"- **3-Yr PAT Growth (CAGR):** `{pat_cagr_str}`")
-
-            st.markdown("#### 💵 Cash Conversion Quality")
-            st.write(f"- **Operating Cash Flow (CFO):** `₹{row['CFO']:,.1f} Cr`")
-            st.write(f"- **Capital Expenditures (CapEx):** `₹{row['CapEx']:,.1f} Cr`")
-            st.write(f"- **Free Cash Flow (FCF):** `₹{fcf:,.1f} Cr`")
-            st.write(f"- **FCF Yield on Market Cap:** `{fcf_yield:.2f}%`")
-
-        with col_b:
-            st.markdown("#### ⚖️ Solvency & Balance Sheet Structure")
-            if not is_fin:
-                st.write(f"- **Debt-to-Equity:** `{de:.2f}x`")
-                st.write(f"- **Interest Coverage:** `{int_cov:.1f}x`")
-                st.write(f"- **Altman Z-Score:** `{z_score:.2f if z_score else 'N/A'}` (Zone: **{z_zone}**)")
-            else:
-                st.write("*- Financial Entity: Standard Debt/Altman metrics bypassed.*")
-                st.write(f"- **Net Worth:** `₹{row['Net_Worth']:,.1f} Cr`")
-            st.write(f"- **Piotroski F-Score:** `{f_score}/8` ({ 'Pristine operational health' if f_score >= 6 else 'Average operational safeguards' if f_score >= 4 else 'Weak trend' })")
+    elif metric == "D/E":
+        if is_fin:
+            status = "🏦 Banking Entity"
+            meaning = f"{c} is a financial institution that takes deposits to lend. Traditional Debt-to-Equity is not an informative risk gauge here."
+            takeaway = "Focus instead on asset quality, NPA trends, and Capital Adequacy."
+        else:
+            val = row["D/E"]
+            status = "🟢 Debt-Free / Pristine" if val < 0.1 else "✅ Healthy" if val < 0.7 else "⚠️ High Debt"
+            meaning = f"For every ₹1 of money owned by shareholders, {c} owes **₹{val:.2f} to outside lenders and banks**."
+            takeaway = "Companies with low debt rarely face bankruptcy risk during economic recessions."
             
-            st.markdown("#### 🏷️ Relative Valuation Multiples")
-            st.write(f"- **Current P/E:** `{pe_str}`")
-            st.write(f"- **Market Capitalization:** `₹{row['Market_Cap']:,.1f} Cr`")
-            st.write(f"- **CWIP to Net Block:** `{safe_div(cwip, nb)*100.0:.1f}%`")
+    elif metric == "Interest Coverage":
+        if is_fin:
+            status = "🏦 Exempt"
+            meaning = "Interest cost is a raw operational expense for banks, making traditional coverage ratios redundant."
+            takeaway = "Evaluate Net Interest Margin (NIM) and Return on Assets."
+        else:
+            val = row["Interest Coverage"]
+            status = "🟢 Bulletproof" if val > 6 else "✅ Adequate" if val >= 2.5 else "🚨 Strained"
+            meaning = f"{c} earns enough operating profit to pay its annual loan interest obligations **{val:.1f} times over**."
+            takeaway = "Ratios above 4.0x mean the company can comfortably handle rising interest rate cycles."
 
-    else:
-        st.markdown(f"### 🏛️ Institutional Quantitative Profile: {c}")
-        c1, c2, c3 = st.columns(3)
+    elif metric == "FCF":
+        val = row["FCF"]
+        pat = row["Net Profit"]
+        status = "🟢 True Cash Generator" if val > 0 else "⚠️ Cash Burner"
+        meaning = (
+            f"Accounting profit on paper was ₹{pat:,.0f} Cr, but after actually upgrading and building factories (CapEx of ₹{row['CapEx']:,.0f} Cr), "
+            f"{c} took home **₹{val:,.0f} Cr in cold, hard liquid bank cash**."
+        )
+        takeaway = "Stock prices follow free cash flow over the long run. Dividends and share buybacks come strictly from FCF."
+
+    elif metric == "P/E":
+        val = row["PE"]
+        status = "🟢 Reasonable" if (0 < val <= 25) else "⚖️ Premium Growth" if (25 < val <= 55) else "🚨 Expensive" if val > 55 else "⚠️ Loss-Making"
+        meaning = (
+            f"Investors in the market are currently paying **₹{val:.1f} for every ₹1 of profit** {c} earns annually."
+            if val > 0 else f"{c} reported a net loss over the latest period, so traditional P/E cannot be computed."
+        )
+        takeaway = "Paying too high a multiple reduces your margin of safety, even for great businesses."
+
+    elif metric == "Piotroski":
+        val = row["Piotroski"]
+        status = "🟢 Clean Audit" if val >= 6 else "⚖️ Average" if val >= 4 else "🚨 Financial Warning"
+        meaning = f"Out of 8 fundamental checks testing profitability, balance sheet leverage, and operating efficiency, {c} cleared **{val} criteria**."
+        takeaway = "Scores of 7 or 8 suggest sound accounting integrity and improving business fundamentals."
         
-        with c1:
-            st.markdown("##### 📌 Earnings Quality & Accruals")
-            st.write(f"• **Sloan Accrual Ratio:** `{sloan:.2%}`")
-            if abs(sloan) > 0.10:
-                st.caption("⚠️ High accruals detected. Disconnect between Net Income and CFO.")
-            else:
-                st.caption("✅ Low accruals. Earnings are supported by cash.")
-            st.write(f"• **CFO / PAT Ratio:** `{safe_div(row['CFO'], pat):.2f}x`")
-            st.write(f"• **Piotroski F-Score:** `{f_score}/8`")
+    else:
+        return ""
 
-        with c2:
-            st.markdown("##### 📌 Capital Allocation & Moat")
-            st.write(f"• **ROCE (Capital Employed):** `{roce:.2f}%`")
-            st.write(f"• **ROE (Equity Capital):** `{roe:.2f}%`")
-            st.write(f"• **FCF Yield %:** `{fcf_yield:.2f}%`")
-            st.write(f"• **Asset Turnover:** `{safe_div(row['Sales'], row['Total_Assets']):.2f}x`")
+    return f"""
+    <div style="background-color: var(--card-bg); border-left: 4px solid var(--accent-blue); padding: 14px 18px; border-radius: 6px; margin-bottom: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-weight: 700; font-size: 1.05rem; color: #fff;">{metric} Analysis</span>
+            <span style="font-size: 0.9rem; font-weight: 600;">{status}</span>
+        </div>
+        <p style="margin-bottom: 6px; font-size: 0.95rem; line-height: 1.5;">{meaning}</p>
+        <p style="margin-bottom: 0px; font-size: 0.85rem; color: var(--accent-emerald);">💡 <b>Why it matters:</b> {takeaway}</p>
+    </div>
+    """
 
-        with c3:
-            st.markdown("##### 📌 Risk & Tail Risk Metrics")
-            if not is_fin:
-                st.write(f"• **Altman Z-Score:** `{z_score:.2f if z_score else 'N/A'}` ({z_zone})")
-                st.write(f"• **D/E Leverage:** `{de:.2f}x`")
-                st.write(f"• **Interest Coverage:** `{int_cov:.1f}x`")
-            else:
-                st.write("• **Sector Regime:** Banking / Financial Services")
-                st.write(f"• **Total Assets:** `₹{row['Total_Assets']:,.1f} Cr`")
-            st.write(f"• **CWIP / Net Block:** `{safe_div(cwip, nb)*100.0:.1f}%`")
+def get_intermediate_metric_desc(metric, row):
+    c = row["Company"]
+    if metric == "ROE %":
+        return f"**{metric}:** `{row['ROE %']:.1f}%` vs Cost of Equity (~12%). Generates excess economic return on equity capital."
+    elif metric == "ROCE %":
+        return f"**{metric}:** `{row['ROCE %']:.1f}%` return on total capital deployed (Equity + Net Debt)."
+    elif metric == "D/E":
+        return f"**{metric}:** `{row['D/E']:.2f}`. Net balance sheet gearing."
+    elif metric == "Interest Coverage":
+        return f"**{metric}:** `{row['Interest Coverage']:.1f}x` EBIT to Finance charges."
+    elif metric == "FCF":
+        return f"**{metric}:** CFO of `₹{row['Sales']*0.15:,.0f}Cr` minus CapEx of `₹{row['CapEx']:,.0f}Cr` = `₹{row['FCF']:,.0f}Cr` FCF."
+    elif metric == "P/E":
+        return f"**{metric}:** Trailing P/E of `{row['PE']:.1f}x` vs 3-Year PAT CAGR of `{row['3Yr PAT CAGR %']:.1f}%`."
+    elif metric == "Piotroski":
+        return f"**{metric}:** `{row['Piotroski']}/8` scoring across liquidity, solvency, and operational margins."
+    return ""
+
+def get_pro_metric_desc(metric, row):
+    if metric == "ROE %":
+        return f"**DuPont Deconstruction:** ROE of `{row['ROE %']:.2f}%` driven by OPM `{row['OPM %']:.2f}%`."
+    elif metric == "D/E":
+        return f"**Capital Structure:** Debt: `{row['D/E']:.2f}x` | Solvency status: `{row['Zone']}` (Altman Z: `{row['Altman Z']:.2f}`)."
+    elif metric == "Interest Coverage":
+        return f"**Fixed Charge Coverage:** Coverage `{row['Interest Coverage']:.2f}x` on operating EBIT."
+    elif metric == "FCF":
+        return f"**FCF Yield:** `{row['FCF Yield %']:.2f}%` on Market Cap. Sloan Accrual: `{row['Sloan %']:.2f}%`."
+    elif metric == "P/E":
+        return f"**Valuation Complex:** P/E: `{row['PE']:.1f}x` | EV/EBITDA: `{row['EV/EBITDA']:.1f}x`."
+    elif metric == "Piotroski":
+        return f"**Forensic Score:** `{row['Piotroski']}/8` confirming balance sheet and operational earnings quality."
+    return ""
+
+def render_expertise_deep_dive(row, category, level):
+    metrics_map = {
+        "Compounding & Returns": ["ROE %", "ROCE %"],
+        "Solvency & Balance Sheet": ["D/E", "Interest Coverage"],
+        "Cash Generation": ["FCF"],
+        "Valuation & Integrity": ["P/E", "Piotroski"]
+    }
+    
+    target_metrics = metrics_map.get(category, [])
+    output = []
+    
+    for m in target_metrics:
+        if level == "🌱 Beginner Investor":
+            desc = get_beginner_metric_desc(m, row)
+            output.append(desc)
+        elif level == "📈 Intermediate Investor":
+            desc = get_intermediate_metric_desc(m, row)
+            output.append(f"<div style='margin-bottom: 8px;'>{desc}</div>")
+        else:
+            desc = get_pro_metric_desc(m, row)
+            output.append(f"<div style='margin-bottom: 8px;'>{desc}</div>")
+            
+    return "\n\n".join(output)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. UI & CONTROL FLOW
 # ─────────────────────────────────────────────────────────────────────────────
+
 inject_custom_css()
 
-st.markdown("""
-<div class="hero-banner">
-    <div class="hero-title">🏛️ Institutional Equity Research Terminal</div>
-    <div class="hero-subtitle">High-throughput fundamental analytics, forensic risk auditing & beginner-to-institutional research synthesis.</div>
-</div>
-""", unsafe_allow_html=True)
-
 with st.sidebar:
-    st.header("🎛️ Terminal Settings")
-    
-    expertise_level = st.radio(
-        "Select Investor Experience Level:",
-        [
-            "🌱 Beginner Investor (Plain English)",
-            "📈 Intermediate Investor (Ratios & Financials)",
-            "🏛️ Pro / Institutional Analyst (Deep Forensic Quant)"
-        ],
-        index=0
-    )
-    
+    st.header("📂 Batch Ingestion")
+    uploads = st.file_uploader("Upload Screener Excels", type=["xlsx", "xls"], accept_multiple_files=True)
     st.divider()
-    st.header("📁 Financial Data Ingestion")
-    st.caption("Upload Screener.in standard Excel workbooks (.xlsx / .xls).")
-    uploaded_files = st.file_uploader(
-        "Upload Cohort Excel Files",
-        type=["xlsx", "xls"],
-        accept_multiple_files=True
+    st.markdown("### 🏛️ Experience Controls")
+    complexity_level = st.radio(
+        "Select Analysis Complexity:", 
+        ["🌱 Beginner Investor", "📈 Intermediate Investor", "🏛️ Pro / Institutional Analyst"]
     )
-    
     st.divider()
-    max_pe_bound = st.slider("Plotly Scatter: Max P/E Bound", min_value=30, max_value=250, value=80, step=10)
+    st.markdown("### ⚙️ Terminal Settings")
+    max_pe_bound = st.slider(
+        "Scatter Plot Max P/E Axis Limit", 
+        min_value=50, max_value=300, value=150, step=25, 
+        help="Clips scatter plot x-axis upper bound to prevent valuation outliers from compressing the chart."
+    )
+    st.divider()
+    st.caption(f"Institutional Terminal v5.0 | {datetime.now().year}")
 
-if uploaded_files:
-    parsed_companies = []
+st.markdown("<h1 class='hero-title'>🏛️ Institutional Research Terminal</h1>", unsafe_allow_html=True)
+st.markdown("<p class='hero-subtitle'>Dynamic Quantitative Auditor & Multi-Asset Valuation Architecture</p>", unsafe_allow_html=True)
+
+if uploads:
+    results = []
     raw_files = []
-    
-    for up_file in uploaded_files:
-        try:
-            content = up_file.read()
-            raw_files.append((up_file.name, content))
-            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
-            res = extract_financial_data(wb, up_file.name)
-            parsed_companies.append(res)
-        except Exception as e:
-            st.error(f"Error parsing workbook `{up_file.name}`: {str(e)}")
+    for up in uploads:
+        data, b_content = process_workbook(up.getvalue(), up.name)
+        if data:
+            results.append(data)
+            raw_files.append((up.name, b_content))
 
-    if parsed_companies:
-        df_cohort = pd.DataFrame(parsed_companies)
+    if results:
+        df = pd.DataFrame(results)
         
-        tab_deep, tab_matrix, tab_visual, tab_risk, tab_export = st.tabs([
-            "🔍 Strategic Deep-Dive", 
-            "📊 Cohort Master Matrix", 
-            "📈 Visual Analytics", 
-            "🛡️ Forensic Risk Auditor", 
-            "📥 Export Reports"
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 Master Grid", "🕵️ Comparative Research Deep-Dive", 
+            "📈 Visual Benchmarks", "🚨 Forensic Auditor", "📄 Export Report"
         ])
 
-        with tab_deep:
-            valid_roe = df_cohort[df_cohort["ROE"] > 0]
-            top_roe_comp = valid_roe.loc[valid_roe["ROE"].idxmax()]["Company"] if not valid_roe.empty else "N/A"
-            top_roe_val = valid_roe["ROE"].max() if not valid_roe.empty else 0.0
-
-            valid_pe = df_cohort[df_cohort["PE"].notna() & (df_cohort["PE"] > 0)]
-            low_pe_comp = valid_pe.loc[valid_pe["PE"].idxmin()]["Company"] if not valid_pe.empty else "N/A"
-            low_pe_val = valid_pe["PE"].min() if not valid_pe.empty else 0.0
-
-            valid_z = df_cohort[df_cohort["Altman_Z"].notna()]
-            safe_z_comp = valid_z.loc[valid_z["Altman_Z"].idxmax()]["Company"] if not valid_z.empty else "N/A"
-            safe_z_val = valid_z["Altman_Z"].max() if not valid_z.empty else 0.0
-
-            kpi1, kpi2, kpi3 = st.columns(3)
-            kpi1.metric("🏆 Cohort ROE Leader", top_roe_comp, f"{top_roe_val:.1f}%")
-            kpi2.metric("🏷️ Lowest Valuation (P/E)", low_pe_comp, f"{low_pe_val:.1f}x" if low_pe_val else "N/A")
-            kpi3.metric("🛡️ Safest Solvency (Altman Z)", safe_z_comp, f"{safe_z_val:.2f}" if safe_z_val else "N/A")
-
-            st.divider()
-
-            selected_company_name = st.selectbox(
-                "Select Company to Inspect:", 
-                options=df_cohort["Company"].tolist(),
-                index=0
-            )
-            selected_row = df_cohort[df_cohort["Company"] == selected_company_name].iloc[0]
-            generate_strategic_narrative(selected_row, expertise_level)
-
-        with tab_matrix:
-            st.markdown("### 📊 Multi-Company Fundamental Matrix")
-            display_cols = [
-                "Company", "Sector", "CMP", "Market_Cap", "PE", "OPM", "ROE", 
-                "ROCE", "Interest_Coverage", "DE_Ratio", "FCF_Yield", 
-                "Piotroski_Score", "Altman_Z", "Z_Zone"
-            ]
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 1: MASTER QUANTITATIVE MATRIX
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab1:
+            st.subheader("Master Quantitative Grid")
             
-            format_dict = {
-                "CMP": "₹{:,.1f}",
-                "Market_Cap": "₹{:,.0f} Cr",
-                "PE": "{:.1f}x",
-                "OPM": "{:.1f}%",
-                "ROE": "{:.1f}%",
-                "ROCE": "{:.1f}%",
-                "Interest_Coverage": "{:.1f}x",
-                "DE_Ratio": "{:.2f}x",
-                "FCF_Yield": "{:.2f}%",
-                "Piotroski_Score": "{:d}/8",
-                "Altman_Z": lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
-            }
-            
-            clean_display_df = df_cohort[display_cols].copy()
+            disp_df = df.copy()
             st.dataframe(
-                clean_display_df.style.format(format_dict, na_rep="N/A"),
-                use_container_width=True,
+                disp_df[[
+                    "Company", "Sector_Type", "Market Cap", "Sales", "Net Profit", 
+                    "PE", "EV/EBITDA", "ROE %", "ROCE %", "D/E", "Interest Coverage", 
+                    "FCF Yield %", "Piotroski", "Altman Z", "Zone"
+                ]].style.format({
+                    "Market Cap": "₹{:,.0f}Cr", 
+                    "Sales": "₹{:,.0f}Cr", 
+                    "Net Profit": "₹{:,.0f}Cr",
+                    "PE": lambda x: f"{x:.1f}x" if x > 0 else "N/A (Loss)",
+                    "EV/EBITDA": lambda x: f"{x:.1f}x" if x > 0 else "N/A",
+                    "ROE %": "{:.1f}%", 
+                    "ROCE %": "{:.1f}%", 
+                    "D/E": "{:.2f}", 
+                    "Interest Coverage": lambda x: f"{x:.1f}x" if pd.notna(x) and x < 900 else ("Debt Free" if x >= 900 else "N/A (Bank)"),
+                    "FCF Yield %": "{:.1f}%", 
+                    "Piotroski": "{}/8", 
+                    "Altman Z": lambda x: f"{x:.2f}" if pd.notna(x) else "N/A"
+                }), 
+                use_container_width=True, 
                 height=450
             )
 
-        with tab_visual:
-            st.markdown("### 📈 Visual Analytics Suite")
-            col_v1, col_v2 = st.columns(2)
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 2: 3-TIER COMPARATIVE DEEP-DIVE
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab2:
+            st.subheader("🕵️ Comparative Research Deep-Dive")
             
-            with col_v1:
-                scatter_df = df_cohort.copy()
-                scatter_df["Scatter_PE"] = scatter_df["PE"].fillna(max_pe_bound + 5).clip(upper=max_pe_bound)
-                scatter_df["Bubble_Size"] = scatter_df["Market_Cap"].clip(lower=100)
+            # Header KPI summary cards
+            col_kpi1, col_kpi2, col_kpi3, col_kpi4 = st.columns(4)
+            best_roe_comp = df.loc[df['ROE %'].idxmax()]
+            low_pe_df = df[df['PE'] > 0]
+            best_pe_comp = low_pe_df.loc[low_pe_df['PE'].idxmin()] if not low_pe_df.empty else df.iloc[0]
+            best_fcf_comp = df.loc[df['FCF'].idxmax()]
+            best_pio_comp = df.loc[df['Piotroski'].idxmax()]
+
+            col_kpi1.metric("🏆 Highest ROE", f"{best_roe_comp['ROE %']:.1f}%", best_roe_comp['Company'])
+            col_kpi2.metric("🏷️ Lowest P/E", f"{best_pe_comp['PE']:.1f}x" if best_pe_comp['PE'] > 0 else "N/A", best_pe_comp['Company'])
+            col_kpi3.metric("💰 Cash Flow King", f"₹{best_fcf_comp['FCF']:,.0f}Cr", best_fcf_comp['Company'])
+            col_kpi4.metric("🛡️ Top Quality Score", f"{best_pio_comp['Piotroski']}/8", best_pio_comp['Company'])
+
+            st.divider()
+
+            selected_company = st.selectbox("Select Company for Strategic Analysis:", df["Company"].unique())
+            row = df[df["Company"] == selected_company].iloc[0]
+
+            # Strategic Quick Verdict Banner
+            roe_val = row["ROE %"]
+            de_val = row["D/E"]
+            pio_val = row["Piotroski"]
+            fcf_val = row["FCF"]
+            is_fin = row["Is_Financial"]
+
+            if roe_val >= 16 and (de_val < 0.6 or is_fin) and pio_val >= 6 and fcf_val > 0:
+                verdict = "STRONG BUY / CORE COMPOUNDER"
+                verdict_color = "var(--accent-emerald)"
+                verdict_summary = "Pristine capital returns, conservative balance sheet leverage, and outstanding accounting cash conversion."
+            elif roe_val >= 12 and (de_val <= 1.2 or is_fin) and pio_val >= 5:
+                verdict = "ACCUMULATE / HIGH-QUALITY WATCHLIST"
+                verdict_color = "var(--accent-blue)"
+                verdict_summary = "Solid fundamental performance with sustainable market share and reasonable balance sheet safeguards."
+            elif de_val > 1.5 and not is_fin:
+                verdict = "CAUTION: HIGH LEVERAGE EXPOSURE"
+                verdict_color = "var(--accent-orange)"
+                verdict_summary = "Debt load warrants close monitoring; rising interest rates or cyclical downswings could pressure cash margins."
+            else:
+                verdict = "NEUTRAL / SELECTIVE HOLD"
+                verdict_color = "#9ca3af"
+                verdict_summary = "Balanced growth trajectory without asymmetric upside or immediate balance sheet catalysts."
+
+            st.markdown(f"""
+            <div style="background-color: var(--card-bg); border: 1px solid var(--border-color); border-top: 4px solid {verdict_color}; padding: 18px 22px; border-radius: 8px; margin-bottom: 22px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <span style="font-size: 1.15rem; font-weight: 800; color: {verdict_color};">📌 STRATEGIC VERDICT: {verdict}</span>
+                    <span style="font-size: 0.85rem; color: #8b949e; text-transform: uppercase;">Sector: {row['Sector_Type']}</span>
+                </div>
+                <p style="margin: 0; color: #c9d1d9; font-size: 0.95rem;">{verdict_summary}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # 3-Tier Multi-Pillar View
+            t_col1, t_col2 = st.columns(2)
+            
+            with t_col1:
+                st.markdown("#### 1. Compounding & Returns")
+                comp_desc = render_expertise_deep_dive(row, "Compounding & Returns", complexity_level)
+                st.markdown(comp_desc, unsafe_allow_html=True)
+
+                st.markdown("#### 2. Cash Reality & True Earnings")
+                cash_desc = render_expertise_deep_dive(row, "Cash Generation", complexity_level)
+                st.markdown(cash_desc, unsafe_allow_html=True)
+
+            with t_col2:
+                st.markdown("#### 3. Solvency & Balance Sheet Shield")
+                solv_desc = render_expertise_deep_dive(row, "Solvency & Balance Sheet", complexity_level)
+                st.markdown(solv_desc, unsafe_allow_html=True)
+
+                st.markdown("#### 4. Valuation & Audit Integrity")
+                val_desc = render_expertise_deep_dive(row, "Valuation & Integrity", complexity_level)
+                st.markdown(val_desc, unsafe_allow_html=True)
+
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 3: INTERACTIVE VISUAL BENCHMARKS
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab3:
+            st.subheader("📈 Institutional Visual Analytics")
+            
+            v_col1, v_col2 = st.columns(2)
+            
+            with v_col1:
+                plot_df = df.copy()
+                plot_df["Clamped_PE"] = plot_df["PE"].apply(
+                    lambda x: max(0.0, min(float(x), float(max_pe_bound))) if (pd.notna(x) and x > 0) else 0.0
+                )
                 
                 fig_scatter = px.scatter(
-                    scatter_df,
-                    x="Scatter_PE",
-                    y="ROE",
-                    size="Bubble_Size",
-                    color="Z_Zone",
+                    plot_df, 
+                    x="Clamped_PE", 
+                    y="ROE %", 
+                    size="Market Cap", 
+                    color="Zone",
                     hover_name="Company",
-                    hover_data={"Scatter_PE": False, "PE": ":.1f", "ROE": ":.1f%", "Market_Cap": ":,.0f"},
-                    title=f"Valuation (P/E) vs. Capital Return (ROE %) [Clamped at {max_pe_bound}x]",
-                    labels={"Scatter_PE": "P/E Multiple", "ROE": "Return on Equity (ROE %)"},
-                    template="plotly_dark",
+                    hover_data={
+                        "Clamped_PE": False, 
+                        "PE": ":.1f", 
+                        "ROE %": ":.1f%", 
+                        "Market Cap": ":,.0f",
+                        "Zone": True
+                    },
                     color_discrete_map={
                         "Safe": "#10b981", 
                         "Grey": "#f59e0b", 
                         "Distress": "#ef4444", 
-                        "Financial Entity (Exempt)": "#3b82f6"
-                    }
+                        "N/A (Financial)": "#3b82f6"
+                    },
+                    title=f"Valuation (P/E) vs. Profitability (ROE %) [Bounded at {max_pe_bound}x P/E]",
+                    labels={"Clamped_PE": "P/E Multiple", "ROE %": "Return on Equity (ROE %)"},
+                    template="plotly_dark"
                 )
-                fig_scatter.update_layout(height=480, range_x=[-5, max_pe_bound + 10])
+                fig_scatter.update_layout(
+                    height=450,
+                    xaxis=dict(range=[-2, max_pe_bound + 5]),
+                    margin=dict(l=20, r=20, t=50, b=20)
+                )
                 st.plotly_chart(fig_scatter, use_container_width=True)
 
-            with col_v2:
+            with v_col2:
                 fig_bar = go.Figure()
                 fig_bar.add_trace(go.Bar(
-                    x=df_cohort["Company"],
-                    y=df_cohort["Piotroski_Score"],
-                    name="Piotroski F-Score (Max 8)",
+                    x=df["Company"], 
+                    y=df["Piotroski"], 
+                    name="Piotroski F-Score (Max 8)", 
                     marker_color="#3b82f6"
                 ))
-                clean_z = df_cohort["Altman_Z"].fillna(0)
+                clean_altman = df["Altman Z"].fillna(0)
                 fig_bar.add_trace(go.Bar(
-                    x=df_cohort["Company"],
-                    y=clean_z,
-                    name="Altman Z-Score",
+                    x=df["Company"], 
+                    y=clean_altman, 
+                    name="Altman Z-Score", 
                     marker_color="#10b981"
                 ))
                 fig_bar.update_layout(
-                    barmode="group",
-                    title="Piotroski Operational Health vs. Altman Solvency",
-                    template="plotly_dark",
-                    height=480,
-                    yaxis_title="Score"
+                    barmode="group", 
+                    title="Piotroski Score vs. Altman Z-Score Benchmark",
+                    template="plotly_dark", 
+                    height=450,
+                    margin=dict(l=20, r=20, t=50, b=20)
                 )
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-        with tab_risk:
-            st.markdown("### 🛡️ Automated Forensic Risk Auditor")
-            st.caption("Heuristic screening across cash flow divergence, balance sheet stress, accruals & execution risk.")
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 4: FORENSIC AUDITOR
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab4:
+            st.subheader("🚨 Automated Forensic Auditor")
+            st.markdown("<p style='color: #8b949e; margin-bottom: 20px;'>Rule-based checks flagging accrual anomalies, working capital expansion, and balance sheet distress.</p>", unsafe_allow_html=True)
             
-            c_r1, c_r2, c_r3, c_r4 = st.columns(4)
-            
-            with c_r1:
-                st.markdown("#### 1. Cash Conversion")
-                for _, r in df_cohort.iterrows():
-                    if r["FCF"] < 0 and r["PAT"] > 0:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-danger'>Drain</span>", unsafe_allow_html=True)
-                        st.caption(f"PAT: ₹{r['PAT']:,.0f} Cr vs FCF: ₹{r['FCF']:,.0f} Cr")
-                    elif r["FCF"] > r["PAT"]:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-safe'>Cash Cow</span>", unsafe_allow_html=True)
-                    else:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-neutral'>Normal</span>", unsafe_allow_html=True)
+            cols = st.columns(4)
+            cols[0].markdown("##### 1. Cash Conversion")
+            cols[1].markdown("##### 2. Debt Burden")
+            cols[2].markdown("##### 3. Accrual Quality")
+            cols[3].markdown("##### 4. Execution Risk")
 
-            with c_r2:
-                st.markdown("#### 2. Solvency & Debt")
-                for _, r in df_cohort.iterrows():
+            for _, r in df.iterrows():
+                # 1. Cash Conversion
+                with cols[0]:
+                    if r["FCF"] < 0 and r["Net Profit"] > 0:
+                        st.error(f"**{r['Company']}**\n\n⚠️ Negative FCF despite PAT.")
+                    else:
+                        st.success(f"**{r['Company']}**\n\n✅ Sound Cash Conversion.")
+                
+                # 2. Debt Burden
+                with cols[1]:
                     if r["Is_Financial"]:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-neutral'>Bank</span>", unsafe_allow_html=True)
-                    elif r["DE_Ratio"] > 1.2 or (r["Interest_Coverage"] < 2.0 and r["Debt"] > 0):
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-danger'>Leverage Alert</span>", unsafe_allow_html=True)
-                        st.caption(f"D/E: {r['DE_Ratio']:.1f}x | IntCov: {r['Interest_Coverage']:.1f}x")
-                    elif r["DE_Ratio"] < 0.3:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-safe'>Pristine</span>", unsafe_allow_html=True)
+                        st.info(f"**{r['Company']}**\n\n🏦 Financial Institution.")
+                    elif r["D/E"] > 1.2 or (pd.notna(r["Interest Coverage"]) and r["Interest Coverage"] < 2.0):
+                        st.error(f"**{r['Company']}**\n\n⚠️ High Debt / Low Coverage.")
                     else:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-neutral'>Moderate</span>", unsafe_allow_html=True)
-
-            with c_r3:
-                st.markdown("#### 3. Accrual Quality")
-                for _, r in df_cohort.iterrows():
-                    if not r["Is_Financial"] and abs(r["Sloan_Ratio"]) > 0.10:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-warning'>High Accruals</span>", unsafe_allow_html=True)
-                        st.caption(f"Sloan Ratio: {r['Sloan_Ratio']:.1%}")
-                    elif r["Is_Financial"]:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-neutral'>Exempt</span>", unsafe_allow_html=True)
+                        st.success(f"**{r['Company']}**\n\n✅ Conservative Leverage.")
+                
+                # 3. Accrual Quality
+                with cols[2]:
+                    if r["Is_Financial"]:
+                        st.info(f"**{r['Company']}**\n\n🏦 Accrual exempt.")
+                    elif pd.notna(r["Sloan %"]) and abs(r["Sloan %"]) > 10.0:
+                        st.warning(f"**{r['Company']}**\n\n⚠️ Sloan Ratio > 10% ({r['Sloan %']:.1f}%).")
                     else:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-safe'>High Quality</span>", unsafe_allow_html=True)
+                        st.success(f"**{r['Company']}**\n\n✅ Pristine Sloan Accruals.")
 
-            with c_r4:
-                st.markdown("#### 4. Asset Execution")
-                for _, r in df_cohort.iterrows():
-                    cwip_ratio = safe_div(r["CWIP"], r["Net_Block"]) * 100.0
-                    if cwip_ratio > 40.0:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-warning'>High CWIP</span>", unsafe_allow_html=True)
-                        st.caption(f"CWIP / Net Block: {cwip_ratio:.1f}%")
+                # 4. Asset Execution Risk
+                with cols[3]:
+                    if r["CWIP to Net Block %"] > 40.0:
+                        st.warning(f"**{r['Company']}**\n\n⚠️ Heavy CWIP ({r['CWIP to Net Block %']:.1f}% of Block).")
                     else:
-                        st.markdown(f"**{r['Company']}**: <span class='tag-pill tag-safe'>Executed</span>", unsafe_allow_html=True)
+                        st.success(f"**{r['Company']}**\n\n✅ Normal Project Cycle.")
 
-        with tab_export:
-            st.markdown("### 📥 Export Offline Research Reports")
-            st.caption("Generate downloadable research synthesis or backup the ingested Excel workbooks.")
+        # ─────────────────────────────────────────────────────────────────────────
+        # TAB 5: EXPORT REPORT
+        # ─────────────────────────────────────────────────────────────────────────
+        with tab5:
+            st.subheader("📄 Institutional Research Export")
+            st.markdown("Download full quantitative audit notes and ingested workbook packages.")
             
-            report = f"""# Institutional Equity Research Synthesis
-Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Cohort Size: {len(df_cohort)} Companies
+            clean_sub = df[[
+                "Company", "Sector_Type", "Market Cap", "Sales", "Net Profit", 
+                "PE", "ROE %", "ROCE %", "D/E", "Interest Coverage", "FCF", "Piotroski", "Zone"
+            ]].copy()
+            clean_sub["PE"] = clean_sub["PE"].apply(lambda x: f"{x:.1f}x" if x > 0 else "N/A")
+            clean_sub["ROE %"] = clean_sub["ROE %"].apply(lambda x: f"{x:.1f}%")
+            clean_sub["ROCE %"] = clean_sub["ROCE %"].apply(lambda x: f"{x:.1f}%")
+            clean_sub["Market Cap"] = clean_sub["Market Cap"].apply(lambda x: f"₹{x:,.0f}Cr")
+            clean_sub["Sales"] = clean_sub["Sales"].apply(lambda x: f"₹{x:,.0f}Cr")
+            clean_sub["Net Profit"] = clean_sub["Net Profit"].apply(lambda x: f"₹{x:,.0f}Cr")
+            clean_sub["FCF"] = clean_sub["FCF"].apply(lambda x: f"₹{x:,.0f}Cr")
 
-## 1. Executive Summary & Cohort Matrix
-| Company | Sector | PE | ROE % | ROCE % | D/E | FCF (₹ Cr) | Piotroski | Altman Z |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+            table_md = dataframe_to_markdown_table(clean_sub)
+            
+            md_report = f"""# Institutional Equity Research Synthesis
+*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*
+
+## 1. Quantitative Benchmark Matrix
+{table_md}
+
+## 2. Forensic Audit Summary
+- **Cohort Coverage**: {len(df)} companies
+- **Cash Flow Outliers**: {len(df[df['FCF'] < 0])} companies showing negative FCF despite positive PAT.
+- **Solvency Alerts**: {len(df[(df['D/E'] > 1.2) & (~df['Is_Financial'])])} industrial entities displaying D/E > 1.2x.
+
+## 3. Methodology & Notes
+All fundamental metrics parsed directly from raw Screener.in institutional models. EBIT falls back dynamically to operating cash flows and financing PBT for financial entities.
 """
-            for _, r in df_cohort.iterrows():
-                pe_fmt = f"{r['PE']:.1f}x" if r['PE'] else "N/A"
-                z_fmt = f"{r['Altman_Z']:.2f}" if pd.notna(r['Altman_Z']) else "N/A"
-                report += f"| {r['Company']} | {r['Sector']} | {pe_fmt} | {r['ROE']:.1f}% | {r['ROCE']:.1f}% | {r['DE_Ratio']:.2f}x | {r['FCF']:,.1f} | {r['Piotroski_Score']}/8 | {z_fmt} |\n"
 
-            report += "\n## 2. Company Research Profiles\n"
-            for _, r in df_cohort.iterrows():
-                report += f"\n### {r['Company']}\n"
-                report += f"- **Sector:** {r['Sector']}\n"
-                report += f"- **Compounding:** ROE: {r['ROE']:.1f}%, ROCE: {r['ROCE']:.1f}%\n"
-                report += f"- **Cash Reality:** PAT: ₹{r['PAT']:,.1f} Cr vs FCF: ₹{r['FCF']:,.1f} Cr (Yield: {r['FCF_Yield']:.2f}%)\n"
-                report += f"- **Health:** Piotroski: {r['Piotroski_Score']}/8, Altman Z: {r['Z_Zone']}\n"
-
-            col_exp1, col_exp2 = st.columns(2)
-            
-            col_exp1.download_button(
-                "📥 Download Institutional Research Report (.md)", 
-                data=report, 
-                file_name=f"Institutional_Terminal_Report_{datetime.now().strftime('%Y%m%d')}.md",
+            c_exp1, c_exp2 = st.columns(2)
+            c_exp1.download_button(
+                "📥 Download Research Report (.md)", 
+                data=md_report, 
+                file_name=f"Equity_Terminal_Report_{datetime.now().strftime('%Y%m%d')}.md",
                 mime="text/markdown"
             )
-            
-            zip_io = io.BytesIO()
-            with zipfile.ZipFile(zip_io, 'w') as zf:
-                for fname, content in raw_files: 
-                    zf.writestr(f"Processed_{fname}", content)
-            
-            col_exp2.download_button(
-                "📥 Download Ingestion Package (.zip)", 
-                data=zip_io.getvalue(), 
+
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w") as zf:
+                for name, b_data in raw_files:
+                    zf.writestr(f"Ingested_{name}", b_data)
+
+            c_exp2.download_button(
+                "📥 Download Ingested Workbooks (.zip)", 
+                data=zip_buffer.getvalue(), 
                 file_name="Ingested_Workbooks_Package.zip",
                 mime="application/zip"
             )
-
 else:
-    st.info("👋 Upload Screener.in Excel exports in the sidebar to run quantitative analysis.")
+    st.info("👋 Upload one or more Screener.in Excel workbooks in the sidebar to begin fundamental analysis.")
